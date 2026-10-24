@@ -586,7 +586,7 @@ function renderBatch() {
   const chosen = selectedHits();
   $batchSummary.textContent = chosen.length
     ? `${chosen.length.toLocaleString()} selected · ${bytes(selectedSize(chosen))}`
-    : "Select files to copy, move, or delete";
+    : "Select files to copy, move, or delete · F5 copy · F6 move · F8 delete";
   $("batch-all").disabled = chosen.length === items.length;
   $("batch-none").disabled = !chosen.length;
   for (const id of ["batch-paths", "batch-copy", "batch-move", "batch-delete"]) $(id).disabled = !chosen.length;

@@ -90,9 +90,17 @@ With the .deb, DigUp tells you when there's a new version and opens its release 
 | ⌘↩ | Ctrl+Enter | Shows it in Finder, Explorer or your file manager |
 | ⌘C | Ctrl+C (in the window) | Copies the file, to paste anywhere |
 | ⌘O | Ctrl+O | The same search in a bigger window, with a picture grid and filters |
+| — | Insert / Ctrl+A | Selects results in the big window to copy, move or delete (Windows; Ctrl+A outside the search field) |
+| — | Ctrl+M | Shows only pictures, screenshots, video and audio in the big window |
+| — | F5 / F6 / F8 | Copy To… / Move To… / Delete the selected files (Windows) |
 
 DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
+
+On Windows, the big window can move, copy and delete the pictures, screenshots, video and audio a search shows:
+select them and use the bar under the results or the right-click menu. A name that's taken gets a number
+(`photo (2).jpg`) instead of overwriting a file; Delete goes to the Recycle Bin. Moving or deleting updates the index
+without reading the files again, and a copy that lands in a folder you search is indexed like any new file.
 
 A few things differ by system:
 
@@ -127,7 +135,8 @@ Outside the folders you pick for code search, it never reads code, and inside a 
 `package.json` and the like) it reads only screenshots. It never reads keys, certificates, password files, hidden
 folders like `.ssh`, apps or caches. It skips folders that look like datasets, and never downloads files that only
 live in the cloud (iCloud on a Mac, OneDrive on Windows). You can skip more folders or file types in Settings. DigUp
-only reads your files; it never changes, moves or uploads them.
+never uploads your files. On a Mac it only reads them; on Windows it changes, moves or deletes only the results you
+choose in the big window, and Delete goes to the Recycle Bin.
 
 The first pass happens once. On a Mac it takes a few minutes for a few hundred files and can take an hour for a big
 Downloads folder. On Windows and Linux, DigUp runs the model on the graphics card where that's faster and on the
