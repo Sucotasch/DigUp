@@ -422,6 +422,28 @@ fn taken(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// How many of `paths` have a name already in `destination` (they get a number), and the name the first one would
+/// take (`photo (2).jpg`). The window's Move/Copy sheet says so only when there is one.
+pub fn conflicts(destination: &Path, paths: &[String]) -> (usize, Option<String>) {
+    // One listing for the whole batch: `taken` would read the folder again for each file.
+    let existing: std::collections::HashSet<String> = std::fs::read_dir(destination)
+        .map(|entries| entries.flatten().map(|entry| entry.file_name().to_string_lossy().to_lowercase()).collect())
+        .unwrap_or_default();
+    let mut count = 0;
+    let mut example = None;
+    for path in paths {
+        let from = Path::new(path);
+        let Some(name) = from.file_name() else { continue };
+        if existing.contains(&name.to_string_lossy().to_lowercase()) {
+            count += 1;
+            if example.is_none() {
+                example = free_path(destination, from).file_name().map(|name| name.to_string_lossy().into_owned());
+            }
+        }
+    }
+    (count, example)
+}
+
 // MARK: The index
 
 /// The path as the index knows it: `/`, whatever Windows uses.
@@ -730,6 +752,22 @@ mod tests {
         let item = Item { path: source.display().to_string(), size: None, mtime: None };
         assert!(check_source(&source, &item).is_err());
         let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn conflicts_are_counted_and_named() {
+        let destination = folder("conflicts");
+        let source = folder("conflicts-source");
+        put(&destination, "photo.jpg");
+        let free = put(&source, "notes.txt");
+        let taken = put(&source, "photo.jpg");
+        assert_eq!(conflicts(&destination, &[free.display().to_string()]), (0, None));
+        let (count, example) = conflicts(&destination, &[free.display().to_string(), taken.display().to_string()]);
+        assert_eq!(count, 1);
+        assert_eq!(example.as_deref(), Some("photo (2).jpg"));
+        for path in [destination, source] {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 
     #[cfg(windows)]

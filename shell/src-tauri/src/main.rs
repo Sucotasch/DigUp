@@ -327,6 +327,24 @@ async fn pick_destination_folder(app: AppHandle, title: Option<String>) -> Optio
         .map(|path| path.display().to_string())
 }
 
+/// Move To… / Copy To…: how many of the chosen names are taken where they go (they'd get a number), and the name the
+/// first one would take (`photo (2).jpg`). The sheet says so only when there is one.
+#[tauri::command]
+fn destination_conflicts(destination: String, paths: Vec<String>) -> Value {
+    let (count, example) = file_ops::conflicts(std::path::Path::new(&destination), &paths);
+    json!({ "count": count, "example": example })
+}
+
+/// Move To…, Copy To…, Delete: whether the window asks first (Settings → General), read as it starts one.
+#[tauri::command]
+fn operation_confirmations(shell: State<'_, Arc<Shell>>) -> Value {
+    let settings = shell.settings.lock().unwrap();
+    json!({
+        "moveCopy": !settings.confirm_move_copy_off,
+        "delete": !settings.confirm_delete_off,
+    })
+}
+
 /// What indexing these folders would take, one answer per folder (`digup estimate --json`): files by kind, the first
 /// pass's seconds, the rest of long files, subfolders. For setup.
 #[tauri::command]
@@ -711,7 +729,8 @@ fn main() {
         .setup(move |app| setup(app, options))
         .invoke_handler(tauri::generate_handler![
             ask, estimate, setup_info, pick_folders, apply_setup_folders, finish_setup, open_path, open_code, reveal, hide_panel, panel_height,
-            panel_area, settings_info, set_open_at_login, set_center_panel, set_processor_only, debug_query, debug_report, window_info,
+            panel_area, settings_info, set_open_at_login, set_center_panel, set_processor_only, set_confirm_move_copy,
+            set_confirm_delete, debug_query, debug_report, window_info, destination_conflicts, operation_confirmations,
             app_state, open_window, open_settings, choose_folders, index_now, quit_app, close_window, pause_indexing,
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
@@ -1302,6 +1321,8 @@ fn settings_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
         "canOpenAtLogin": shell.opens_at_login(),
         "centered": shell.settings.lock().unwrap().center_panel,
         "processorOnly": settings.processor_only,
+        "confirmMoveCopy": !settings.confirm_move_copy_off,
+        "confirmDelete": !settings.confirm_delete_off,
         // Windows' tray reports clicks (Linux's open the menu, a Mac's too).
         "canChooseTrayClick": cfg!(windows),
         "trayClick": if settings.tray_click == "panel" { "panel" } else { "window" },
@@ -1323,7 +1344,8 @@ fn settings_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
                 .collect::<Vec<_>>(),
         },
         "state": shell.snapshot(),
-        "updateChecks": !settings.update_checks_off,
+        "updateChecks": !settings.update_checks_off && updates::enabled(),
+        "updatesEnabled": updates::enabled(),
         "installsUpdates": updates::installs_itself(),
         "version": app.package_info().version.to_string(),
         "licenses": licenses_file(&app).is_some(),
@@ -1641,6 +1663,22 @@ fn with_exec(text: &str, exec: &str) -> String {
     lines.join("\n")
 }
 
+/// Settings → General: ask before moving or copying several files (`operation_confirmations`).
+#[tauri::command]
+fn set_confirm_move_copy(shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), String> {
+    let mut settings = shell.settings.lock().unwrap();
+    settings.confirm_move_copy_off = !on;
+    settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))
+}
+
+/// Settings → General: ask before deleting (to the Recycle Bin).
+#[tauri::command]
+fn set_confirm_delete(shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), String> {
+    let mut settings = shell.settings.lock().unwrap();
+    settings.confirm_delete_off = !on;
+    settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))
+}
+
 /// The model on the processor from now on (the running search service and indexing helper are ended; they start
 /// again with the new environment when next needed).
 #[tauri::command]
@@ -1704,7 +1742,7 @@ fn make_tray(app: &AppHandle, shell: &Arc<Shell>) -> tauri::Result<()> {
     let index = MenuItem::with_id(app, "index", "Index Now", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause Indexing", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-    let check = MenuItem::with_id(app, "check", "Check for Updates…", true, None::<&str>)?;
+    let check = MenuItem::with_id(app, "check", "Check for Updates…", updates::enabled(), None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit DigUp", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(

@@ -626,51 +626,102 @@ function chosenItems(files) {
   return files.map((hit) => ({ path: hit.path, size: hit.size ?? null, mtime: hit.modified ?? null }));
 }
 
-/// Move To… / Copy To…: the folder (the system's picker), then a sheet saying what will happen, then the work.
-async function moveOrCopy(kind) {
-  const files = selectedHits();
-  if (!isWindows || !files.length || state.busy || !$modal.hidden) return;
-  let destination = null;
+/// Whether Settings asks first for this operation (`operation_confirmations`); asking is the safe way when it can't
+/// be read.
+async function asksFirst(kind) {
   try {
-    destination = await invoke("pick_destination_folder", {
-      title: kind === "move" ? "Move to Folder" : "Copy to Folder",
-    });
-  } catch (error) {
-    failed(error);
-    return;
+    const answer = await invoke("operation_confirmations");
+    return kind === "delete" ? answer.delete !== false : answer.moveCopy !== false;
+  } catch {
+    return true;
   }
-  if (!destination) return;
-  const box = element("div", "modal-box");
-  box.append(element("h2", "", `${kind === "move" ? "Move" : "Copy"} ${countOf(files.length, "file")}?`));
-  box.append(element("div", "modal-path", destination));
-  box.append(element("p", "", `${bytes(selectedSize(files))} · nothing is overwritten: a name that's taken gets a number `
-    + `(photo (2).jpg).`));
-  const actions = element("div", "modal-actions");
-  const cancel = element("button", "", "Cancel");
-  cancel.onclick = closeModal;
-  const go = element("button", "primary", kind === "move" ? "Move" : "Copy");
-  go.onclick = () => operate(kind, destination, files);
-  actions.append(cancel, go);
-  box.append(actions);
-  showModal(box);
 }
 
-/// Delete: always to the Recycle Bin, and always with this sheet in between.
-function confirmDelete() {
+/// The names in `destination` that are taken (they'd get a number): the sheet says so only when there are any.
+async function destinationConflicts(destination, files) {
+  try {
+    const answer = await invoke("destination_conflicts", {
+      destination,
+      paths: files.map((file) => file.path),
+    });
+    return { count: Number(answer.count) || 0, example: answer.example || null };
+  } catch {
+    return { count: 0, example: null };
+  }
+}
+
+/// One picker or sheet at a time: the picker and the confirmations are awaited.
+let choosing = false;
+
+/// Move To… / Copy To…: the folder (the system's picker), then, for several files, a sheet saying what will happen.
+async function moveOrCopy(kind) {
   const files = selectedHits();
-  if (!isWindows || !files.length || state.busy || !$modal.hidden) return;
-  const box = element("div", "modal-box");
-  box.append(element("h2", "", `Move ${files.length === 1 ? "this file" : `${files.length} files`} to the Recycle Bin?`));
-  box.append(element("p", "", `${bytes(selectedSize(files))}. You can put ${files.length === 1 ? "it" : "them"} back `
-    + `from the Recycle Bin.`));
-  const actions = element("div", "modal-actions");
-  const cancel = element("button", "", "Cancel");
-  cancel.onclick = closeModal;
-  const go = element("button", "danger", "Move to Recycle Bin");
-  go.onclick = () => operate("delete", null, files);
-  actions.append(cancel, go);
-  box.append(actions);
-  showModal(box);
+  if (!isWindows || !files.length || state.busy || !$modal.hidden || choosing) return;
+  choosing = true;
+  try {
+    let destination = null;
+    try {
+      destination = await invoke("pick_destination_folder", {
+        title: kind === "move" ? "Move to Folder" : "Copy to Folder",
+      });
+    } catch (error) {
+      failed(error);
+      return;
+    }
+    if (!destination) return;
+    // One file (the folder was the choice), or Settings turned the question off: the work starts now.
+    if (files.length === 1 || !(await asksFirst(kind))) {
+      operate(kind, destination, files);
+      return;
+    }
+    const conflicts = await destinationConflicts(destination, files);
+    const box = element("div", "modal-box");
+    box.append(element("h2", "", `${kind === "move" ? "Move" : "Copy"} ${countOf(files.length, "file")}?`));
+    box.append(element("div", "modal-path", destination));
+    const taken = conflicts.count
+      ? ` · ${countOf(conflicts.count, "name")} ${conflicts.count === 1 ? "is" : "are"} already there: `
+        + `${conflicts.count === 1 ? "it gets" : "they get"} a number`
+        + (conflicts.example ? ` (${conflicts.example})` : "") + "."
+      : " · nothing is overwritten.";
+    box.append(element("p", "", bytes(selectedSize(files)) + taken));
+    const actions = element("div", "modal-actions");
+    const cancel = element("button", "", "Cancel");
+    cancel.onclick = closeModal;
+    const go = element("button", "primary", kind === "move" ? "Move" : "Copy");
+    go.onclick = () => operate(kind, destination, files);
+    actions.append(cancel, go);
+    box.append(actions);
+    showModal(box);
+  } finally {
+    choosing = false;
+  }
+}
+
+/// Delete: to the Recycle Bin, with this sheet in between unless Settings turned the question off.
+async function confirmDelete() {
+  const files = selectedHits();
+  if (!isWindows || !files.length || state.busy || !$modal.hidden || choosing) return;
+  choosing = true;
+  try {
+    if (!(await asksFirst("delete"))) {
+      operate("delete", null, files);
+      return;
+    }
+    const box = element("div", "modal-box");
+    box.append(element("h2", "", `Move ${files.length === 1 ? "this file" : `${files.length} files`} to the Recycle Bin?`));
+    box.append(element("p", "", `${bytes(selectedSize(files))}. You can put ${files.length === 1 ? "it" : "them"} back `
+      + `from the Recycle Bin.`));
+    const actions = element("div", "modal-actions");
+    const cancel = element("button", "", "Cancel");
+    cancel.onclick = closeModal;
+    const go = element("button", "danger", "Move to Recycle Bin");
+    go.onclick = () => operate("delete", null, files);
+    actions.append(cancel, go);
+    box.append(actions);
+    showModal(box);
+  } finally {
+    choosing = false;
+  }
 }
 
 /// The second, explicit action after the Recycle Bin refused paths that are too long. It shows the scope by folder,
@@ -1138,7 +1189,19 @@ function renderSide() {
   $side.replaceChildren();
   if (!hit) return;
   $side.append(previewPicture(hit), facts(hit), why(hit), actions(hit));
+  fitPreview();
 }
+
+/// The picture takes the room the facts and actions leave. Its max-height is set in pixels: a percentage of the frame's
+/// own, content-sized height wouldn't limit it (the picture would be clipped by the frame).
+function fitPreview() {
+  const box = $side.querySelector(".preview-picture");
+  if (!box || !$side.clientHeight) return;
+  box.style.setProperty("--preview-height", `${box.clientHeight}px`);
+}
+
+// A taller or shorter window, or the pane hidden and shown again, gives the picture a different room.
+new ResizeObserver(fitPreview).observe($side);
 
 /// Several files chosen: the count and size they add up to, and each one's name and size.
 function summaryOf(hits) {
@@ -1165,6 +1228,7 @@ function previewPicture(hit) {
   if (hit.kind === "audio") {
     box.append(audioMoment(hit));
     box.style.height = "150px";
+    box.style.flex = "none";
     return box;
   }
   if (hit.kind === "code") {
@@ -1193,7 +1257,7 @@ function previewPicture(hit) {
   // The cell's picture first (already drawn), then the bigger one.
   const small = renders.get(`${hit.path}|${what[0]}|${what[1]}|${Math.round(240 * (window.devicePixelRatio || 1))}`);
   small?.then((file) => { if (!image.dataset.big) image.src = fileURL(file); }).catch(() => {});
-  rendered(hit.path, what[0], what[1], Math.round(300 * (window.devicePixelRatio || 1)))
+  rendered(hit.path, what[0], what[1], Math.round(460 * (window.devicePixelRatio || 1)))
     .then((file) => { image.dataset.big = "1"; image.src = fileURL(file); })
     .catch(() => {});
   image.ondblclick = () => open(hit);

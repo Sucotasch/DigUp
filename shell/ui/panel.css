@@ -167,7 +167,7 @@ html, body {
   height: 36px;
   flex: none;
   border-radius: 6px;
-  object-fit: cover;
+  object-fit: contain;
   background: var(--chip);
 }
 

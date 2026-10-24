@@ -1,5 +1,6 @@
 /* The window. Sizes and wording follow the Mac app's search window (Sources/DigUpApp/SearchWindow.swift); the colors
-   are DigUp's (moss and amber) over the system's light or dark, and selection is the usual blue. */
+   are DigUp's (moss and amber) over the system's light or dark; chosen files are the usual blue, the file under
+   the keyboard amber, so the two never blur together. */
 
 :root {
   --amber: #f2a22a;
@@ -170,7 +171,11 @@ svg { display: block; }
   padding: 16px;
   border-left: 1px solid var(--line);
   background: var(--pane);
+  display: flex;
+  flex-direction: column;
 }
+/* Everything under the picture keeps its size; the picture takes the height that's left. */
+.side > :not(.preview-picture) { flex: none; }
 
 .grid {
   display: grid;
@@ -183,15 +188,18 @@ svg { display: block; }
 
 .cell .picture {
   position: relative;
-  height: 132px;
+  aspect-ratio: 1 / 1;
   border-radius: 8px;
   background: var(--tile);
   box-shadow: inset 0 0 0 0.5px var(--line);
   overflow: hidden;
   display: grid;
+  /* Its one row is the box's height: an auto row would take the picture's own height at the box's width (a tall
+     picture's is several times the box) and the image would be clipped to its top. */
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
 }
-.cell.selected .picture { box-shadow: 0 0 0 3px var(--accent); }
+.cell.selected .picture { box-shadow: 0 0 0 3px var(--amber); }
 
 /* Choosing files for Move To, Copy To and Delete: a tick in the corner, shown as the pointer comes over the cell (or
    the tick has the keyboard), and a tint on the ones chosen. */
@@ -217,6 +225,10 @@ svg { display: block; }
 .cell.checked .checkbox { background: var(--accent); border-color: transparent; }
 .cell.checked .checkbox svg { opacity: 1; }
 .cell.checked .picture { box-shadow: 0 0 0 3px var(--accent), inset 0 0 0 999px color-mix(in srgb, var(--accent) 14%, transparent); }
+/* The keyboard's file among the chosen ones: amber outside their blue, so the two rings never read as one. */
+.cell.selected.checked .picture {
+  box-shadow: 0 0 0 3px var(--amber), inset 0 0 0 999px color-mix(in srgb, var(--accent) 14%, transparent);
+}
 .cell .checkbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* One chosen file in the side panel: how many, how much, and each one's name and size. */
@@ -228,8 +240,7 @@ svg { display: block; }
 .summary-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .summary-size { flex: none; color: var(--secondary); font-variant-numeric: tabular-nums; }
 
-.cell .picture img { width: 100%; height: 100%; object-fit: cover; }
-.cell .picture img.page { object-position: top; }
+.cell .picture img { width: 100%; height: 100%; object-fit: contain; }
 .cell .picture .big-icon svg { width: 46px; height: 46px; fill: none; stroke: var(--ember); stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
 .cell .picture .big-icon.quiet svg { stroke: var(--tertiary); width: 40px; height: 40px; }
 
@@ -441,7 +452,8 @@ svg { display: block; }
 /* The preview pane */
 
 .preview-picture {
-  height: 230px;
+  flex: 1 1 auto;
+  min-height: 230px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -453,11 +465,14 @@ svg { display: block; }
   max-width: 100%;
   max-height: 100%;
   display: flex;
+  align-items: center;
   border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18), 0 0 0 0.5px var(--line);
 }
-.preview-picture .frame img { max-width: 292px; max-height: 230px; display: block; }
+/* Its height is set in pixels by fitPreview: a percentage of the frame's own, content-sized height wouldn't limit it,
+   and the picture would be clipped by the frame. contain keeps the picture's shape. */
+.preview-picture .frame img { max-width: 100%; max-height: var(--preview-height, 230px); object-fit: contain; display: block; }
 .preview-picture video { max-width: 100%; max-height: 100%; border-radius: 8px; background: black; }
 .preview-picture .placeholder {
   width: 100%;

@@ -19,6 +19,15 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 const DAY: u64 = 24 * 60 * 60;
 
+/// This fork doesn't take upstream's updates: one would replace the window and file operations built here with
+/// upstream's. The updater stays wired for a feed and signing key of the fork's own; until then no check runs.
+const UPSTREAM_UPDATES: bool = false;
+
+/// Whether this build checks the feed at all (Settings, the tray, the window's menu).
+pub fn enabled() -> bool {
+    UPSTREAM_UPDATES
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum Phase {
     #[default]
@@ -110,6 +119,10 @@ fn log(shell: &Shell, line: &str) {
 pub fn start(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
     log(&shell, &format!("DigUp {} started", app.package_info().version));
+    if !enabled() {
+        log(&shell, "updates are off in this fork: it has no feed and signing key of its own yet");
+        return;
+    }
     let debug = shell.options.debug_update_check;
     if !debug && (cfg!(debug_assertions) || shell.dev_run()) {
         return;
@@ -137,6 +150,13 @@ pub fn start(app: &AppHandle) {
 /// once); a daily check stays quiet and lets an update wait.
 pub async fn check(app: &AppHandle, asked: bool) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
+    if !enabled() {
+        log(&shell, "updates are off in this fork: it has no feed and signing key of its own yet");
+        if asked {
+            tell(app, "Check for Updates", "Updates are off in this build of DigUp.");
+        }
+        return;
+    }
     {
         let mut phase = shell.updates.phase.lock().unwrap();
         if *phase != Phase::Idle {

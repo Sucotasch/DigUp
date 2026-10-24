@@ -48,6 +48,8 @@ function renderGeneral() {
   $("center-option").hidden = !info.canCenter;
   $("center").checked = info.centered;
   $("processor").checked = info.processorOnly;
+  $("confirm-move-copy").checked = info.confirmMoveCopy;
+  $("confirm-delete").checked = info.confirmDelete;
   $("keys").replaceChildren(...info.hotkey.split("+").filter(Boolean).map((key) => element("span", "key", key)));
   const note = notes[info.shortcut.method];
   $("shortcut-note").hidden = !note;
@@ -61,10 +63,15 @@ function renderGeneral() {
 
 /// Updates: the daily check, and this version or the one waiting (updates.rs).
 function renderUpdates() {
-  $("update-checks").checked = info.updateChecks;
-  $("update-info").textContent = "Once a day DigUp asks GitHub for its newest version; nothing about your files is sent. "
-    + (info.installsUpdates ? "Updates install with one click."
-      : "A new version is downloaded from its release page and installed as this one was.");
+  const updates = info.updatesEnabled !== false;   // a fork's build says so; older shells don't
+  $("update-checks").checked = updates && info.updateChecks;
+  $("update-checks").disabled = !updates;
+  $("check-now").disabled = !updates;
+  $("update-info").textContent = !updates
+    ? "Updates are off in this fork: it doesn't follow upstream's releases."
+    : "Once a day DigUp asks GitHub for its newest version; nothing about your files is sent. "
+      + (info.installsUpdates ? "Updates install with one click."
+        : "A new version is downloaded from its release page and installed as this one was.");
   const update = info.state && info.state.update;
   const version = $("update-version");
   version.classList.toggle("available", Boolean(update));
@@ -86,7 +93,7 @@ $("check-now").onclick = async () => {
   } catch (error) {
     fail(error);
   }
-  $("check-now").disabled = false;
+  $("check-now").disabled = info.updatesEnabled === false;
 };
 
 /// A switch: the shell does it, or the box goes back and says why.
@@ -105,6 +112,8 @@ function wire(box, command) {
 wire($("login"), "set_open_at_login");
 wire($("center"), "set_center_panel");
 wire($("processor"), "set_processor_only");
+wire($("confirm-move-copy"), "set_confirm_move_copy");
+wire($("confirm-delete"), "set_confirm_delete");
 wire($("update-checks"), "set_update_checks");
 for (const choice of document.querySelectorAll('input[name="tray-click"]')) {
   choice.addEventListener("change", () => {
