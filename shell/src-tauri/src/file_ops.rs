@@ -18,12 +18,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    CopyFileExW, CreateFileW, GetFileInformationByHandle, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
-    COPY_FILE_FAIL_IF_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, MOVEFILE_COPY_ALLOWED, OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE,
+    CopyFileExW, CreateFileW, GetFileInformationByHandle, MoveFileExW, SetFileAttributesW, BY_HANDLE_FILE_INFORMATION,
+    COPY_FILE_FAIL_IF_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+    FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    MOVEFILE_COPY_ALLOWED, OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Shell::{
@@ -252,6 +255,9 @@ fn check_source(from: &Path, item: &Item) -> Result<(), String> {
     if !metadata.is_file() {
         return Err("it isn't a file".into());
     }
+    if dataless(&metadata) {
+        return Err("it's only in the cloud, not downloaded".into());
+    }
     if let Some(size) = item.size {
         if metadata.len() as i64 != size {
             return Err("it changed since the search (its size)".into());
@@ -367,6 +373,20 @@ fn path_text(path: &Path) -> String {
 
 fn modified(metadata: &std::fs::Metadata) -> Option<f64> {
     metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok().map(|since| since.as_secs_f64())
+}
+
+/// A cloud placeholder (OneDrive's Files On-Demand, or a File Provider): reading it would download the file, and a
+/// move or copy would too. The crawl leaves these out, so one that shows up changed after the search.
+#[cfg(windows)]
+fn dataless(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_attributes()
+        & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        != 0
+}
+
+#[cfg(not(windows))]
+fn dataless(_: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Tells the search helper that the file is at its new path now (its vectors stay), with the identity of the new place:
@@ -734,6 +754,19 @@ mod tests {
         progress.copy().unwrap();
         assert!(copy.is_file());
         let _ = std::fs::remove_dir_all(&destination);
+        let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_cloud_placeholder_is_left_alone() {
+        let source = folder("cloud");
+        let path = put(&source, "photo.jpg");
+        assert_ne!(unsafe { SetFileAttributesW(wide(&path).as_ptr(), FILE_ATTRIBUTE_OFFLINE) }, 0);
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert!(dataless(&metadata));
+        let item = Item { path: path.display().to_string(), size: Some(7), mtime: None };
+        assert_eq!(check_source(&path, &item).unwrap_err(), "it's only in the cloud, not downloaded");
         let _ = std::fs::remove_dir_all(&source);
     }
 
