@@ -304,8 +304,10 @@ fn copy_to_free(app: &AppHandle, id: u64, position: usize, total: usize, from: &
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                let _ = std::fs::remove_file(&target);
-                return Err(why(&error));
+                return Err(match std::fs::remove_file(&target) {
+                    Ok(()) => why(&error),
+                    Err(cleanup) => format!("{}; the partial copy couldn't be removed: {cleanup}", why(&error)),
+                });
             }
         }
     }

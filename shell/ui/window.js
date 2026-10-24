@@ -552,7 +552,9 @@ function copyPaths() {
   const chosen = selectedHits();
   const paths = chosen.length ? chosen.map((hit) => hit.path) : [state.selection].filter(Boolean);
   if (!paths.length) return;
-  navigator.clipboard.writeText(paths.join("\n")).catch(() => {});
+  navigator.clipboard.writeText(paths.join("\n"))
+    .then(() => setNote(paths.length === 1 ? "Copied the path" : `Copied ${paths.length.toLocaleString()} paths`))
+    .catch((error) => failed(`The paths couldn't be copied: ${error}`));
 }
 
 /// All · Media 14 · Screenshots 4 · …: the media count is the four kinds together.

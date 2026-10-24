@@ -294,10 +294,12 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
 
     /// Whether the crawl of one of the chosen folders reaches a moved file's new folder. `Rules.isWalked`, not just
     /// "inside a chosen folder": hidden, `.noindex`, skipped and developer folders aren't walked, and a row left there
-    /// would go at the next sync (#144). Windows paths compare without case, as its disks do.
+    /// would go at the next sync (#144). A dot-prefixed file is hidden to the walk as well. Windows paths compare
+    /// without case, as its disks do.
     private func isCrawled(_ path: String) -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        // The folder, not the file: a file named `.photo.jpg` is still one the crawl classifies.
+        // The walk skips hidden files by name (and on Windows, by attribute); the folder rules only cover the folders.
+        guard !(path as NSString).lastPathComponent.hasPrefix(".") else { return false }
         let target = FolderSelection.realPath(FolderSelection.parent(path))
         return roots.contains { root in
             let realRoot = FolderSelection.realPath(root)

@@ -20,7 +20,8 @@ changed after that run.
 - Manual Recycle Bin restore E2E: **not run** (needs a real Explorer session).
 
 The issues below are ordered by correctness risk, then by cost. Each has a concrete fix; none of them blocks the current
-Windows beta, but the first two should be settled before the feature is called finished.
+Windows beta, but H1 (long-path delete) and the remaining destination-level rules behind H2 should be settled before the
+feature is called finished.
 
 ---
 
@@ -72,6 +73,9 @@ Bin check; it is a separate, testable change.
 ---
 
 ### H2. A moved dot-file stays in the index although the crawler never reads it
+
+**Status: fixed in this pass, minimum form.** `isCrawled` now rejects a dot-prefixed file name before checking the
+folder; the full classifier (Windows hidden attribute, excluded types, datasets) remains in “Remaining concerns”.
 
 `SearchService.isCrawled` checks the destination **folder**, with this comment:
 
@@ -138,6 +142,8 @@ design of `reload:false`.
 ---
 
 ### M2. A failed cleanup after a partial copy is swallowed
+
+**Status: fixed in this pass.** The returned error now includes the cleanup failure.
 
 `copy_to_free` removes a partial destination after a failed `CopyFileExW`:
 
@@ -210,6 +216,8 @@ This keeps the first click cheap and still makes every name reachable. A virtual
 
 ### M4. `Copy Paths` silently does nothing when the clipboard is unavailable
 
+**Status: fixed in this pass.** Success goes to the status note, failure to the normal error line.
+
 `copyPaths` ends with:
 
 ```js
@@ -280,6 +288,9 @@ These were found in the same review and are already in `main`, so they are not o
 | Dead full-code sync helper and outdated plan claims | removed; plan updated | `787ee43`, `1e1df9b` |
 | Shell clippy warnings | test-only imports moved; `then_some`, `is_multiple_of`, `is_none_or`, `next_back` | `cd85c2c` |
 | README said DigUp “never changes, moves” files | now documents Move/Copy/Delete and the Recycle Bin | `2ebc94d` |
+| A moved dot-file stayed indexed although the crawl skips hidden names | `isCrawled` rejects dot-prefixed names | this pass |
+| A failed partial-copy cleanup was swallowed | the error now names the file that couldn't be removed | this pass |
+| `Copy Paths` failed silently | success and failure both reach the status bar | this pass |
 
 The current feature is in a good state: the core paths are tested, the index follows without re-embedding, and the
 Windows-specific behaviour (wide paths, cloud placeholders, echo suppression) has direct tests. The remaining work is
