@@ -842,7 +842,7 @@ symlink; `ReferenceVectorTests` не запускается без модели.
 - Отчёт живёт до следующей операции, а не до следующего поиска. Для больших партий показываются первые 8 строк и кнопка `Show all N`: 5 000 перемещённых и 500 переименованных не превращаются в простыню, но каждое новое имя доступно по клику. В шапке — `Moved 5,000 files · 500 renamed`, под списком — пояснение, что имя было занято и DigUp добавил номер.
 
 **Проверено (Windows, 2026-10-24):**
-- `cargo test --locked` — 33 теста, все прошли (включая `change_may_matter`, точные Windows-заметки echo, move/copy пути длиннее 260 символов и пропуск cloud placeholder’а).
+- `cargo test --locked` — 35 тестов, все прошли (включая `change_may_matter`, точные Windows-заметки echo, move/copy пути длиннее 260 символов, пропуск cloud placeholder’а, read-only и занятый файл).
 - `swift test` — 124 теста в 17 suites: `IncrementalSyncTests` 8/8 (изоляция выбранных папок, move между scopes, удаление, выбранная папка внутри исключения, project/package-правила, dataset, пустой список путей); `CrawlerTests` проходит. Единственный провал в `DigUpKitTests` — `modelFilesComeFromTheHuggingFaceCacheWhenThere`: создание symlink на Windows без привилегии (Win32 1314), к этой правке отношения не имеет. `LlamaRuntimeTests.vectorsMatchTheReference` не запускается без модели — тоже среда, не регрессия.
 - E2E helper-протокола на `digup.exe index-service`: два root'а, `sync [A/a.txt]` дал `changed=1`, `added=0`, второй root не обойдён; удаление дало `removed=1`; `sync code [code/a.swift]` дал `changed=1`, соседний `README.md` — `unchanged=1`.
 - E2E на `.build/phase4-e2e/root` (76 файлов, 100 векторов):
@@ -859,7 +859,8 @@ symlink; `ReferenceVectorTests` не запускается без модели.
 ### Phase 5 — Полировка
 
 - Длинные пути (`\\?\`) закрыты: `wide()` префиксует абсолютные пути и UNC, а `SHFileOperationW` получает путь без префикса; тест гоняет move/copy за 260 символами.
-- Облачные placeholder’ы закрыты: preflight читает атрибуты и пропускает файл с `FILE_ATTRIBUTE_OFFLINE`/`RECALL_ON_OPEN`/`RECALL_ON_DATA_ACCESS` как «only in the cloud, not downloaded», не гидратируя его. Остались read-only и занятые файлы.
+- Облачные placeholder’ы закрыты: preflight читает атрибуты и пропускает файл с `FILE_ATTRIBUTE_OFFLINE`/`RECALL_ON_OPEN`/`RECALL_ON_DATA_ACCESS` как «only in the cloud, not downloaded», не гидратируя его.
+- Read-only и занятые файлы проверены: read-only move/copy проходят (Windows не считает атрибут запретом на rename), занятый файл даёт `Windows says it's in use, or not allowed`, остаётся на месте и может быть обработан после закрытия.
 - Отмена и частичные ошибки.
 - Доступность, подсказки, документация.
 - Корзина — штатный инструмент Windows, отдельная автоматизация restore не нужна: пользователь восстанавливает штатно, событие создания файла ловит watcher, а если DigUp был выключен — полный sync при следующем запуске. Строка была удалена из индекса (`file_op delete`), поэтому при восстановлении файл **заново эмбеддится**: это ожидаемая цена delete, а не потеря. Отдельный тест restore+sync остаётся ручным E2E.

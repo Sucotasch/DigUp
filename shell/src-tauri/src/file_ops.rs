@@ -24,9 +24,9 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     CopyFileExW, CreateFileW, GetFileInformationByHandle, MoveFileExW, SetFileAttributesW, BY_HANDLE_FILE_INFORMATION,
-    COPY_FILE_FAIL_IF_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
-    FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    MOVEFILE_COPY_ALLOWED, OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE,
+    COPY_FILE_FAIL_IF_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_COPY_ALLOWED, OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Shell::{
@@ -755,6 +755,52 @@ mod tests {
         assert!(copy.is_file());
         let _ = std::fs::remove_dir_all(&destination);
         let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[cfg(windows)]
+    fn clear_read_only(path: &Path) {
+        unsafe { SetFileAttributesW(wide(path).as_ptr(), FILE_ATTRIBUTE_NORMAL) };
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_only_files_still_move_and_copy() {
+        let destination = folder("readonly-dest");
+        let source = folder("readonly-source");
+        let from = put(&source, "photo.jpg");
+        assert_ne!(unsafe { SetFileAttributesW(wide(&from).as_ptr(), FILE_ATTRIBUTE_READONLY) }, 0);
+        let (moved, _) = move_to_free(&from, &destination).unwrap();
+        assert!(moved.is_file());
+        let copy = free_path(&source, &moved);
+        let cancel = AtomicBool::new(false);
+        let progress = Progress { app: None, id: 1, position: 0, total: 1, from: &moved, to: &copy, cancel: &cancel,
+                                  last: AtomicU64::new(0) };
+        progress.copy().unwrap();
+        assert!(copy.is_file());
+        clear_read_only(&moved);
+        clear_read_only(&copy);
+        for path in [destination, source] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_busy_file_is_reported_and_stays() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let destination = folder("busy-dest");
+        let source = folder("busy-source");
+        let from = put(&source, "photo.jpg");
+        // No sharing: a move, a copy and a delete all meet Windows' sharing violation.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&from).unwrap();
+        assert!(move_to_free(&from, &destination).is_err());
+        assert!(from.is_file() && !destination.join("photo.jpg").exists());
+        drop(held);
+        let (moved, _) = move_to_free(&from, &destination).unwrap();
+        assert!(moved.is_file());
+        for path in [destination, source] {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 
     #[cfg(windows)]
