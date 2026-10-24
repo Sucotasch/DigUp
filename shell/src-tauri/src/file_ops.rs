@@ -786,6 +786,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn unicode_names_move_and_copy() {
+        let destination = folder("unicode-dest");
+        let source = folder("unicode-source");
+        let name = "é-日-ı-ö.jpg";
+        let from = put(&source, name);
+        let (moved, renamed) = move_to_free(&from, &destination).unwrap();
+        assert!(!renamed);
+        assert_eq!(moved.file_name().unwrap(), name);
+        let copy = free_path(&source, &moved);
+        let cancel = AtomicBool::new(false);
+        let progress = Progress { app: None, id: 1, position: 0, total: 1, from: &moved, to: &copy, cancel: &cancel,
+                                  last: AtomicU64::new(0) };
+        progress.copy().unwrap();
+        assert!(copy.is_file());
+        assert_eq!(copy.file_name().unwrap(), name);
+        for path in [destination, source] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn a_busy_file_is_reported_and_stays() {
         use std::os::windows::fs::OpenOptionsExt;
         let destination = folder("busy-dest");
