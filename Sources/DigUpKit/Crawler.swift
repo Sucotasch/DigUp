@@ -42,10 +42,11 @@ public enum Crawler {
     /// gone, says no). Opening is enough: listing a cloud folder's top level could take a while.
     public static func canList(_ url: URL) -> Bool { FileSystem.canList(url.path) }
 
-    public static func crawl(_ roots: [URL], options: IndexOptions,
+    /// `chosenRoots` preserves selection boundaries and folder-level rules when `roots` are partial walk scopes.
+    public static func crawl(_ roots: [URL], options: IndexOptions, chosenRoots: [URL]? = nil,
                              progress: ((CrawlProgress) -> Void)? = nil) -> CrawlReport {
         let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser.path
+        let home = FolderSelection.crawlPath(fm.homeDirectoryForCurrentUser.path)
         let keys = FileSystem.crawlKeys
         var report = CrawlReport()
         var projectRoots = Set<String>()
@@ -57,12 +58,38 @@ public enum Crawler {
             report.skipped[reason, default: 0] += 1
             report.leftOut[root, default: [:]][reason, default: 0] += 1
         }
-        let rootPaths = Set(roots.map { $0.standardizedFileURL.path })
+        let chosen = (chosenRoots ?? roots).map { FolderSelection.crawlPath($0.path) }
+        let rootPaths = Set(chosen)
+        let excluded = options.excludedFolders.map(FolderSelection.crawlPath)
         var checked = 0
         let clock = ContinuousClock()
         var lastUpdate = clock.now
 
-        for root in roots.map({ $0.standardizedFileURL }) {
+        for input in roots {
+            let path = FolderSelection.crawlPath(input.path)
+            let root = URL(fileURLWithPath: path, isDirectory: true)
+            guard let context = chosen.filter({ path == $0 || FolderSelection.isInside(path, $0) })
+                .max(by: { $0.count < $1.count }) else { continue }
+            // A selection inside an excluded folder is still searched whole. Only its own descendant skips apply.
+            let skips = excluded.filter { FolderSelection.isInside($0, context) }
+            var folder = path
+            var blocked = false
+            // Check the scope and each ancestor strictly below the selected root. Full crawls never look above it.
+            while folder != context {
+                let url = URL(fileURLWithPath: folder, isDirectory: true)
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                if url.lastPathComponent.hasPrefix(".") || FileSystem.isPackage(url, values)
+                    || Rules.skipReason(forFolder: url, home: home, excluded: skips) != nil
+                    || (options.code && Rules.codeSkipReason(forFolder: url) != nil) {
+                    blocked = true
+                    break
+                }
+                if !options.code && Rules.isProjectRoot(folder) { projectRoots.insert(folder) }
+                let parent = FolderSelection.parent(folder)
+                guard parent != folder else { blocked = true; break }
+                folder = parent
+            }
+            if blocked { continue }
             progress?(CrawlProgress(checked: checked, root: root.path))
             lastUpdate = clock.now
             if Rules.isCacheDirectory(root) {
@@ -71,13 +98,7 @@ public enum Crawler {
             }
             // A folder chosen on purpose is read whole, whatever markers it holds (a home folder with its dotfiles in
             // git, a repo of notes and pictures); the code-project rule applies to project folders found inside it.
-            if options.code { repos.enterRoot(root.path) }
-            // A skip applies inside the chosen folders that contain it: a folder chosen inside a skipped one is
-            // walked whole (`FolderSelection`). The walk reports real paths (/private/var, where the root says /var).
-            let real = FolderSelection.realPath(root.path)
-            let skips = options.excludedFolders.filter {
-                FolderSelection.isInside($0, root.path) || FolderSelection.isInside($0, real)
-            }.flatMap { [$0, FolderSelection.realPath($0)] }
+            if options.code { repos.enterRoot(path) }
             #if os(Windows)
             guard let walker = FileSystem.walk(root) else { continue }
             #else

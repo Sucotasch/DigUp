@@ -20,6 +20,13 @@ import Foundation
 ///                                               (typing never waits on one) and kept in <index>/previews until the
 ///                                               next start
 ///   {"op":"reload"}                           → {"ok":true,"vectors":n,"code_vectors":n}: after indexing changed the index
+///   {"op":"file_op","kind":"move|delete","items":[{"from":…,"to":…,"inode":"…","device":"…","size":n,"mtime":n}],
+///     "reload":bool}                          → {"results":[…],"ok":bool}: the index follows files a shell moved
+///                                               or deleted. A move to a folder the crawl reaches re-paths the row (no
+///                                               re-embedding); out of them, and a delete, removes it. 64-bit file ids
+///                                               come as strings: JSON numbers lose bits above 2^53. `reload` (default
+///                                               true) reloads the vectors after the change; a batch of thousands sends
+///                                               it false and one `reload` when it's done.
 ///   {"op":"summaries","code":bool}            → {"roots":[{"path","missing","unreadable","files","indexed","pending",
 ///                                               "failed","skipped","unfinished","kinds":{kind: n}}]}: what's indexed
 ///                                               under each chosen folder (each code folder, with `code`)
@@ -176,14 +183,61 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             let code = request["code"] as? Bool ?? false
             return ["text": try (code ? codeSearcher : searcher)?.text(ofSegment: segment) ?? NSNull()]
         case "reload":
-            let hadVectors = searcher.vectorsLoaded
-            searcher = try Searcher(store: store, loadVectors: hadVectors)
-            if let codeStore {
-                codeSearcher = try Searcher(store: codeStore, loadVectors: codeSearcher?.vectorsLoaded ?? false)
-            } else {
-                try openCode()
-            }
+            try reload()
             return ["ok": true, "vectors": searcher.vectorCount, "code_vectors": codeSearcher?.vectorCount ?? 0]
+        case "file_op":
+            guard request["code"] as? Bool != true else { throw CLIError("file operations are for the main index") }
+            let kind = request["kind"] as? String ?? ""
+            guard kind == "move" || kind == "delete" else { throw CLIError("unknown file_op kind \(kind)") }
+            var changed = false
+            var results: [[String: Any]] = []
+            // Each file on its own: one that's gone or busy doesn't stop the others.
+            for item in request["items"] as? [[String: Any]] ?? [] {
+                let from = item["from"] as? String ?? ""
+                do {
+                    // The row the search showed; a file changed or deleted since then has none.
+                    guard let row = try store.file(at: from) else {
+                        results.append(["from": from, "ok": true, "index": "missing"])
+                        continue
+                    }
+                    if kind == "delete" {
+                        try store.delete(row.id)
+                        changed = true
+                        results.append(["from": from, "ok": true, "index": "removed"])
+                        continue
+                    }
+                    guard let to = item["to"] as? String, !to.isEmpty else {
+                        throw CLIError("a move needs a destination")
+                    }
+                    if isCrawled(to) {
+                        // A row left at the destination by a file that's gone would keep the path taken.
+                        if let stale = try store.file(at: to), stale.id != row.id { try store.delete(stale.id) }
+                        try store.move(row.id, to: to, inode: u64(item["inode"]), device: u64(item["device"]),
+                                       size: (item["size"] as? NSNumber)?.int64Value,
+                                       mtime: (item["mtime"] as? NSNumber)?.doubleValue)
+                        changed = true
+                        results.append(["from": from, "to": to, "ok": true, "index": "moved"])
+                    } else {
+                        // Outside the folders the crawl walks: the file isn't searchable there.
+                        try store.delete(row.id)
+                        changed = true
+                        results.append(["from": from, "to": to, "ok": true, "index": "removed"])
+                    }
+                } catch {
+                    results.append(["from": from, "ok": false, "error": String("\(error)".prefix(300))])
+                }
+            }
+            var reply: [String: Any] = ["results": results, "ok": !results.contains { ($0["ok"] as? Bool) == false }]
+            // The vectors in memory still say the old paths; without them loaded there's nothing to fix. A batch
+            // reloads once at its end (`reload: false`).
+            let reloadVectors = request["reload"] as? Bool ?? true
+            if changed, reloadVectors, searcher.vectorsLoaded {
+                do { try reload() } catch {
+                    reply["ok"] = false
+                    reply["error"] = "the index changed, but the search couldn't reload it: \(error)"
+                }
+            }
+            return reply
         case "summaries":
             let code = request["code"] as? Bool ?? false
             return ["roots": (code ? codeRoots : roots).map { summary(of: $0, in: code ? codeStore : store) }]
@@ -225,6 +279,41 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
         default:
             throw CLIError("unknown op \(op)")
         }
+    }
+
+    /// Opens the index again, with the vectors if they were loaded: after indexing or a `file_op` changed it.
+    private func reload() throws {
+        let hadVectors = searcher.vectorsLoaded
+        searcher = try Searcher(store: store, loadVectors: hadVectors)
+        if let codeStore {
+            codeSearcher = try Searcher(store: codeStore, loadVectors: codeSearcher?.vectorsLoaded ?? false)
+        } else {
+            try openCode()
+        }
+    }
+
+    /// Whether the crawl of one of the chosen folders reaches a moved file's new folder. `Rules.isWalked`, not just
+    /// "inside a chosen folder": hidden, `.noindex`, skipped and developer folders aren't walked, and a row left there
+    /// would go at the next sync (#144). Windows paths compare without case, as its disks do.
+    private func isCrawled(_ path: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // The folder, not the file: a file named `.photo.jpg` is still one the crawl classifies.
+        let target = FolderSelection.realPath(FolderSelection.parent(path))
+        return roots.contains { root in
+            let realRoot = FolderSelection.realPath(root)
+            #if os(Windows)
+            return Rules.isWalked(target.lowercased(), root: realRoot.lowercased(), home: home.lowercased(),
+                                  excluded: skipped.map { $0.lowercased() })
+            #else
+            return Rules.isWalked(target, root: realRoot, home: home, excluded: skipped)
+            #endif
+        }
+    }
+
+    /// A 64-bit file id as the shell sends it: a string, since JSON numbers lose bits above 2^53.
+    private func u64(_ value: Any?) -> UInt64? {
+        if let text = value as? String { return UInt64(text) }
+        return (value as? NSNumber)?.uint64Value
     }
 
     private func write(_ fields: [String: Any]) {

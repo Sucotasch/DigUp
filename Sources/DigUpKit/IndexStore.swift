@@ -249,6 +249,21 @@ public final class IndexStore {
         return out
     }
 
+    /// The file at a path, as the index has it. A search returns paths from here, so they match exactly; a file moved or
+    /// deleted since then isn't found.
+    public func file(at path: String) throws -> FileRecord? {
+        var found: FileRecord?
+        try db.query("SELECT \(Self.fileColumns) FROM files WHERE path = ?", [.text(path)]) { found = Self.record($0) }
+        return found
+    }
+
+    /// The file with this id, if the index still has it.
+    public func file(_ id: Int64) throws -> FileRecord? {
+        var found: FileRecord?
+        try db.query("SELECT \(Self.fileColumns) FROM files WHERE id = ?", [.int(id)]) { found = Self.record($0) }
+        return found
+    }
+
     /// Adds a file (pending) and returns its id.
     @discardableResult
     public func insert(_ file: Candidate) throws -> Int64 {
@@ -283,11 +298,19 @@ public final class IndexStore {
         }
     }
 
-    /// Same inode, size and date at a new path: a move or rename. Only the path changes; nothing is re-embedded.
-    /// (Screenshot tools move screenshots into project folders all the time.)
-    public func move(_ id: Int64, to path: String) throws {
+    /// Same inode, size and date at a new path: a move or rename. Nothing is re-embedded (screenshot tools move
+    /// screenshots into project folders all the time). Where the new place gives the file another identity — another
+    /// volume has its own device and inode — those and its size and date go with the path, so the next sync knows the
+    /// row is this file and doesn't read it again.
+    public func move(_ id: Int64, to path: String, inode: UInt64? = nil, device: UInt64? = nil, size: Int64? = nil,
+                     mtime: Double? = nil) throws {
         try db.transaction {   // the path and its name entry together
-            try db.run("UPDATE files SET path = ? WHERE id = ?", [.text(path), .int(id)])
+            try db.run("""
+                UPDATE files SET path = ?, inode = coalesce(?, inode), device = coalesce(?, device),
+                    size = coalesce(?, size), mtime = coalesce(?, mtime) WHERE id = ?
+                """, [.text(path), inode.map { .int(Int64(bitPattern: $0)) } ?? .null,
+                      device.map { .int(Int64(bitPattern: $0)) } ?? .null, size.map { .int($0) } ?? .null,
+                      mtime.map { .double($0) } ?? .null, .int(id)])
             try db.run("""
                 UPDATE fts SET name = ?, body = ? WHERE rowid IN (SELECT id FROM segments WHERE file = ? AND kind = 'name')
                 """, [.text(SearchText.normalized(Self.nameText(path))), .text(SearchText.normalized(Self.folderText(path))),
@@ -295,9 +318,12 @@ public final class IndexStore {
         }
     }
 
+    /// Removes a file, its keyword text and its segments (a savepoint where `prune` or a sync is already writing).
     public func delete(_ id: Int64) throws {
-        try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ?)", [.int(id)])
-        try db.run("DELETE FROM files WHERE id = ?", [.int(id)])
+        try db.transaction {
+            try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ?)", [.int(id)])
+            try db.run("DELETE FROM files WHERE id = ?", [.int(id)])
+        }
     }
 
     /// Removes every file that isn't under one of `roots` (folders taken out of the app). Returns how many went.

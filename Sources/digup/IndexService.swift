@@ -11,7 +11,7 @@ import WinSDK
 /// screenshots, and stayed there), and all of it goes back to the system when this process exits.
 ///
 /// Protocol: one command per line on stdin, one JSON event per line on stdout.
-///   stdin:  sync | sync code | stop | backfill on | backfill off      (EOF = stop)
+///   stdin:  sync [JSON paths] | sync code [JSON paths] | stop | backfill on | backfill off (EOF = stop)
 ///   stdout: {"event": "missing" | "pruned" | "scanning" | "sync" | "file" | "rest" | "summary" | "waiting" | "idle" | "error" |
 ///            "exit", ...}; events about the code index say "code": true
 ///
@@ -54,7 +54,10 @@ final class IndexService: @unchecked Sendable {
 
     private let lock = NSLock()
     private var syncRequested = true       // the first thing it does
+    /// nil means a full walk; a set is the coalesced set of changed paths.
+    private var changedPaths: Set<String>?
     private var codeSyncRequested = true
+    private var codeChangedPaths: Set<String>?
     private var stopRequested = false
     private var backfillAllowed: Bool
     /// A sync asked for while files are being indexed waits until then. A crawl of a big folder can take minutes, and
@@ -105,15 +108,29 @@ final class IndexService: @unchecked Sendable {
         var newFiles = Set<Int64>(), newCode = Set<Int64>()
         var codeCounted = code == nil
         while true {
-            if lock.withLock({ () -> Bool in defer { syncRequested = false }; return syncRequested }) {
-                sync(main, into: &newFiles)
+            let mainChanges = lock.withLock { () -> (Bool, [String]?) in
+                let requested = syncRequested
+                let paths = changedPaths.map(Array.init)
+                syncRequested = false
+                changedPaths = nil
+                return (requested, paths)
+            }
+            if mainChanges.0 {
+                sync(main, changedPaths: mainChanges.1, into: &newFiles)
             }
             // The code folders are crawled with the first sync, so their counts show from the start (a big first pass
             // of the main index takes hours); their files are read once the main index has nothing waiting, below.
             if !codeCounted, let code {
                 codeCounted = true
-                if lock.withLock({ () -> Bool in defer { codeSyncRequested = false }; return codeSyncRequested }) {
-                    sync(code, into: &newCode)
+                let codeChanges = lock.withLock { () -> (Bool, [String]?) in
+                    let requested = codeSyncRequested
+                    let paths = codeChangedPaths.map(Array.init)
+                    codeSyncRequested = false
+                    codeChangedPaths = nil
+                    return (requested, paths)
+                }
+                if codeChanges.0 {
+                    sync(code, changedPaths: codeChanges.1, into: &newCode)
                 }
             }
             if lock.withLock({ stopRequested }) { break }
@@ -134,8 +151,15 @@ final class IndexService: @unchecked Sendable {
             // The code index once the main one has nothing waiting: its own sync (code changes come in a while after
             // they settle), what it just queued at once, the rest under the backfill's rules.
             if let code, (try? main.store.pendingCount()) ?? 1 == 0 || !lock.withLock({ backfillAllowed }) {
-                if lock.withLock({ () -> Bool in defer { codeSyncRequested = false }; return codeSyncRequested }) {
-                    sync(code, into: &newCode)
+                let codeChanges = lock.withLock { () -> (Bool, [String]?) in
+                    let requested = codeSyncRequested
+                    let paths = codeChangedPaths.map(Array.init)
+                    codeSyncRequested = false
+                    codeChangedPaths = nil
+                    return (requested, paths)
+                }
+                if codeChanges.0 {
+                    sync(code, changedPaths: codeChanges.1, into: &newCode)
                 }
                 if !newCode.isEmpty {
                     guard run(code, only: newCode) else { break }
@@ -212,7 +236,7 @@ final class IndexService: @unchecked Sendable {
         return available
     }
 
-    private func sync(_ part: Part, into newFiles: inout Set<Int64>) {
+    private func sync(_ part: Part, changedPaths: [String]? = nil, into newFiles: inout Set<Int64>) {
         let started = Date()
         defer {
             let took = Date().timeIntervalSince(started)
@@ -221,7 +245,7 @@ final class IndexService: @unchecked Sendable {
         do {
             let roots = availableRoots(part)
             emit(["event": "scanning", "checked": 0, "code": part.code])
-            let summary = try part.indexer.sync(roots) { progress in
+            let summary = try part.indexer.sync(roots, changedPaths: changedPaths) { progress in
                 var event: [String: Any] = ["event": "scanning", "checked": progress.checked, "code": part.code]
                 if let root = progress.root { event["root"] = root }
                 emit(event)
@@ -320,13 +344,32 @@ final class IndexService: @unchecked Sendable {
     private func readCommands() {
         while let line = readLine() {
             lock.withLock {
-                switch line.trimmingCharacters(in: .whitespaces) {
-                case "sync": syncRequested = true
-                case "sync code": codeSyncRequested = true
-                case "stop": stopRequested = true
-                case "backfill on": backfillAllowed = true
-                case "backfill off": backfillAllowed = false
-                default: break
+                let command = line.trimmingCharacters(in: .whitespaces)
+                if command == "sync" {
+                    syncRequested = true
+                    changedPaths = nil
+                } else if command.hasPrefix("sync code "), let data = command.dropFirst(10).data(using: .utf8),
+                          let paths = try? JSONSerialization.jsonObject(with: data) as? [String] {
+                    let wasRequested = codeSyncRequested
+                    codeSyncRequested = true
+                    if !wasRequested { codeChangedPaths = Set(paths) }
+                    else if let current = codeChangedPaths { codeChangedPaths = current.union(paths) }
+                } else if command.hasPrefix("sync "), let data = command.dropFirst(5).data(using: .utf8),
+                          let paths = try? JSONSerialization.jsonObject(with: data) as? [String] {
+                    let wasRequested = syncRequested
+                    syncRequested = true
+                    if !wasRequested { changedPaths = Set(paths) }
+                    else if let current = changedPaths { changedPaths = current.union(paths) }
+                } else if command == "sync code" {
+                    codeSyncRequested = true
+                    codeChangedPaths = nil
+                } else {
+                    switch command {
+                    case "stop": stopRequested = true
+                    case "backfill on": backfillAllowed = true
+                    case "backfill off": backfillAllowed = false
+                    default: break
+                    }
                 }
             }
             wake.signal()

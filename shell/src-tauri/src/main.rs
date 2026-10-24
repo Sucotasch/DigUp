@@ -7,7 +7,9 @@
 
 mod clipboard;
 mod code;
+mod echo;
 mod editors;
+mod file_ops;
 mod helper;
 mod hotkey;
 mod hours;
@@ -259,10 +261,70 @@ fn folder_arguments(settings: &Settings, code_folders: &[String]) -> Vec<String>
 #[tauri::command]
 async fn ask(shell: State<'_, Arc<Shell>>, request: Value) -> Result<Value, String> {
     let op = request.get("op").and_then(Value::as_str).unwrap_or_default();
-    if !["search", "embed_ahead", "text", "render", "prewarm", "status", "summaries"].contains(&op) {
+    if !["search", "embed_ahead", "text", "render", "prewarm", "status", "summaries", "file_op"].contains(&op) {
         return Err(format!("not a question the panel asks: {op}"));
     }
     shell.search.ask(request).await
+}
+
+/// Move To…, Copy To…, Delete: the files the window selected, into the folder it picked. The files go first; then the
+/// index follows each one (`file_op` in the search helper), so a moved or deleted result leaves the window at once
+/// instead of after a rescan of its folders. If the index couldn't follow, indexing is asked to rescan.
+#[tauri::command]
+async fn file_operation(app: AppHandle, shell: State<'_, Arc<Shell>>, request: Value) -> Result<Value, String> {
+    let shell = shell.inner().clone();
+    let worker = app.clone();
+    let (report, index_failed) = tauri::async_runtime::spawn_blocking(move || {
+        file_ops::run(&worker, &shell, request).map(|report| {
+            let failed = report["index"].as_bool() == Some(false);
+            (report, failed)
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if index_failed {
+        run_index(&app);
+    }
+    // The files moved or went; the watcher's echo is passed over, so no sync comes to bring the counts down. Ask the
+    // search service (which reads the index as it is now) and let the pages follow. A copy changes nothing yet: the
+    // copy is indexed when the watcher sees it. This doesn't wait: a stopped search service is started again here, and
+    // the report shouldn't wait on that (or on a big index being opened) for counts that are only a line in the tray.
+    if report["kind"].as_str() != Some("copy") {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move { refresh_counts(&app).await });
+    }
+    Ok(report)
+}
+
+/// What's in the index now, without a sync: after a move or delete changed it directly (`file_operation`).
+async fn refresh_counts(app: &AppHandle) {
+    let shell = app.state::<Arc<Shell>>().inner().clone();
+    let Ok(reply) = shell.search.ask(json!({"op": "status"})).await else { return };
+    let mut event = json!({"event": "counts"});
+    for key in ["files", "searchable", "pending", "unfinished"] {
+        if let Some(value) = reply.get(key) {
+            event[key] = value.clone();
+        }
+    }
+    shell.status.lock().unwrap().apply(&event);
+    changed(app);
+}
+
+/// Stops a file operation the window started (`file_operation`'s `id`): between files, and a copy where it is.
+#[tauri::command]
+fn cancel_file_operation(id: u64) {
+    file_ops::cancel(id);
+}
+
+/// Move To… / Copy To…: the folder the files go to (none when the picker is cancelled).
+#[tauri::command]
+async fn pick_destination_folder(app: AppHandle, title: Option<String>) -> Option<String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_title(title.unwrap_or_else(|| "Choose Folder".into())).pick_folder(move |folder| {
+        let _ = sender.send(folder);
+    });
+    receiver.await.ok().flatten().and_then(|folder| folder.into_path().ok())
+        .map(|path| path.display().to_string())
 }
 
 /// What indexing these folders would take, one answer per folder (`digup estimate --json`): files by kind, the first
@@ -653,7 +715,8 @@ fn main() {
             app_state, open_window, open_settings, choose_folders, index_now, quit_app, close_window, pause_indexing,
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
-            set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses
+            set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses,
+            file_operation, cancel_file_operation, pick_destination_folder
         ])
         .build(tauri::generate_context!())
         .expect("DigUp couldn't start");
@@ -875,20 +938,27 @@ fn watch_folders(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
     let folders: Vec<PathBuf> = shell.folders().iter().map(PathBuf::from).collect();
     let code_folders: Vec<PathBuf> = shell.code_folders().iter().map(PathBuf::from).collect();
-    let (skipped, code_skipped) = {
+    let (skipped, code_skipped, types) = {
         let settings = shell.settings.lock().unwrap();
-        (settings.skipped.iter().map(PathBuf::from).collect(), settings.code_skipped.iter().map(PathBuf::from).collect())
+        (settings.skipped.iter().map(PathBuf::from).collect(), settings.code_skipped.iter().map(PathBuf::from).collect(),
+         Some(settings.skip_types.clone()))
     };
     changed(app);
     let index = shell.options.index_folder();
     *shell.watcher.lock().unwrap() = (!folders.is_empty()).then(|| {
         let app = app.clone();
-        FolderWatcher::start(&folders, skipped, index.clone(), Duration::from_secs(2), Duration::MAX, move || run_index(&app))
+        FolderWatcher::start(&folders, skipped, index.clone(), types, Duration::from_secs(2), Duration::MAX, move |paths| {
+            // A move or delete already told the index; its echo mustn't start a rescan. Anything else reconciles the
+            // folders the changes are in, not every chosen folder.
+            if !echo::ours(paths) {
+                index_changed(&app, paths);
+            }
+        })
     });
     *shell.code_watcher.lock().unwrap() = (!code_folders.is_empty()).then(|| {
         let app = app.clone();
-        FolderWatcher::start(&code_folders, code_skipped, index, Duration::from_secs(60), Duration::from_secs(600),
-                             move || sync_code(&app))
+        FolderWatcher::start(&code_folders, code_skipped, index, None, Duration::from_secs(60), Duration::from_secs(600),
+                             move |paths| code_changed(&app, paths))
     });
     if !folders.is_empty() || !code_folders.is_empty() || shell.prune.load(Ordering::SeqCst) {
         run_index(app);
@@ -918,7 +988,30 @@ fn run_index(app: &AppHandle) {
     }
 }
 
-/// Code changed in code search's folders: the code index syncs.
+/// Files changed in the folders: the helper reconciles only their folders, which a move or a save makes quick, where
+/// walking every chosen folder would take as long as the whole index.
+fn index_changed(app: &AppHandle, paths: &[PathBuf]) {
+    let shell = app.state::<Arc<Shell>>();
+    if !may_index(&shell) {
+        return;
+    }
+    if let Err(error) = shell.index.sync_paths(&shell.index_launch(), paths) {
+        set_status(app, &format!("Indexing couldn't start: {error}"));
+    }
+}
+
+/// Code changed in code search's folders: the code index syncs just those folders.
+fn code_changed(app: &AppHandle, paths: &[PathBuf]) {
+    let shell = app.state::<Arc<Shell>>();
+    if !may_index(&shell) {
+        return;
+    }
+    if let Err(error) = shell.index.sync_code_paths(&shell.index_launch(), paths) {
+        set_status(app, &format!("Indexing couldn't start: {error}"));
+    }
+}
+
+/// Code search was turned on or off, or its folders changed: the code index syncs everything.
 fn sync_code(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>();
     if !may_index(&shell) {

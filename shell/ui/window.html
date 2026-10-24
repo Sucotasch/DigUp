@@ -33,6 +33,20 @@
     <aside class="side" id="side" aria-live="polite"></aside>
   </div>
 
+  <section class="report" id="report" aria-live="polite" hidden></section>
+
+  <section class="batch" id="batch" aria-label="Chosen files" hidden>
+    <span class="batch-summary" id="batch-summary"></span>
+    <span class="spacer"></span>
+    <button class="batch-action" id="batch-all">Select All</button>
+    <button class="batch-action" id="batch-none">Deselect All</button>
+    <button class="batch-action" id="batch-paths">Copy Paths</button>
+    <span class="batch-divider" aria-hidden="true"></span>
+    <button class="batch-action" id="batch-copy">Copy To…</button>
+    <button class="batch-action" id="batch-move">Move To…</button>
+    <button class="batch-action danger" id="batch-delete">Delete</button>
+  </section>
+
   <footer class="status">
     <span class="ring" id="ring" hidden></span>
     <button class="status-line" id="status-line" title="Folders and indexing"></button>
@@ -42,6 +56,7 @@
   </footer>
 
   <div class="menu" id="menu" role="menu" hidden></div>
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden></div>
   <script src="results.js"></script>
   <script src="window.js"></script>
 </body>

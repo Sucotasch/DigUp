@@ -274,11 +274,38 @@ impl IndexService {
     /// Code search's folders changed: the running helper syncs the code index (`run` would sync the main one), or one
     /// starts (it syncs both).
     pub fn sync_code(&self, launch: &Launch) -> Result<(), String> {
+        self.request(launch, "sync code")
+    }
+
+    /// Only what changed under these paths: the helper reconciles their folders instead of walking every chosen one.
+    pub fn sync_paths(&self, launch: &Launch, paths: &[PathBuf]) -> Result<(), String> {
+        self.sync_paths_as(launch, paths, "sync")
+    }
+
+    /// The same for the code index.
+    pub fn sync_code_paths(&self, launch: &Launch, paths: &[PathBuf]) -> Result<(), String> {
+        self.sync_paths_as(launch, paths, "sync code")
+    }
+
+    fn sync_paths_as(&self, launch: &Launch, paths: &[PathBuf], command: &str) -> Result<(), String> {
+        if paths.is_empty() {
+            // The system dropped events: anything may have changed, so walk everything.
+            return self.run(launch);
+        }
+        let paths: Vec<String> = paths.iter().map(|path| path.to_string_lossy().replace('\\', "/")).collect();
+        let request = format!("{command} {}", json!(paths));
+        self.request(launch, &request)
+    }
+
+    /// A command for a running helper with these folders; one that isn't running starts (and syncs everything).
+    fn request(&self, launch: &Launch, command: &str) -> Result<(), String> {
         {
             let mut running = self.running.lock().unwrap();
             if let Some(indexing) = running.as_mut() {
                 if matches!(indexing.child.try_wait(), Ok(None)) && indexing.args == launch.args {
-                    return writeln!(indexing.stdin, "sync code").and_then(|_| indexing.stdin.flush()).map_err(|e| e.to_string());
+                    indexing.owed = true;
+                    return writeln!(indexing.stdin, "{command}").and_then(|_| indexing.stdin.flush())
+                        .map_err(|error| error.to_string());
                 }
             }
         }

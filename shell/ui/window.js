@@ -16,6 +16,10 @@ const FILTERS = [
 ];
 const FILTER_OF_KIND = { screenshot: "screenshots", image: "images", pdf: "documents", doc: "documents", video: "video",
                          audio: "audio" };
+/// What Move To, Copy To and Delete work on in the first step: media, not documents or code.
+const MEDIA = new Set(["screenshot", "image", "video", "audio"]);
+/// Its chip, next to All: the four kinds above, with a key of its own (Ctrl+M) so the numbered chips keep theirs.
+const MEDIA_FILTER = { key: "media", title: "Media", kinds: [...MEDIA] };
 const EXAMPLES = [
   ["a screenshot of an error message", "screenshots"], ["receipt", "documents"], ["whiteboard notes", "images"],
   ["someone laughing", "audio"], ["a dog on the beach", "video"], ["slides about the budget", "documents"],
@@ -29,6 +33,7 @@ const SEARCH_ICON = '<svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.5"/><
 
 const $ = (id) => document.getElementById(id);
 const $query = $("query"), $content = $("content"), $side = $("side"), $kinds = $("kinds"), $menu = $("menu");
+const $batch = $("batch"), $batchSummary = $("batch-summary"), $modal = $("modal"), $report = $("report");
 
 const state = {
   query: "",
@@ -41,6 +46,12 @@ const state = {
   hasResults: false,    // the results of the query in the field are in
   codePhase: null,      // "hint": "code:" alone; "off": no code folders
   selection: null,      // a result's path
+  selected: new Set(),  // the files chosen for Move To, Copy To or Delete (their paths; media only)
+  anchor: null,         // where a Shift-click or Shift-arrow range starts
+  strong: [],           // the strong results of the query, whatever the filter (the chips' numbers)
+  busy: null,           // the file operation under way: {id, kind, done, total, bytes, size, path}
+  sheet: false,         // a sheet is up: a confirmation, or an operation's progress
+  note: null,           // what the status bar says for a moment after an operation
   showWeaker: false,
   showsPreview: true,
   navigated: false,     // the selection was moved by the arrow keys or a click since the last edit: ← → move it then
@@ -66,6 +77,8 @@ function run() {
   clearTimeout(state.timer);
   state.navigated = false;
   state.error = null;
+  state.note = null;       // a search's count is what matters now, not the last operation's line; its report stays
+  clearSelection(false);   // a new query or filter starts with nothing chosen
   const typed = state.query.trim();
   const code = isCode();
   const text = /^code:/i.test(typed) ? typed.slice(5).trim() : typed;
@@ -80,21 +93,17 @@ function run() {
   // Results of an earlier query stay until these are in; with none to show, a spinner.
   renderBar();
   if (!state.hasResults) renderContent();
-  const filter = FILTERS.find((item) => item.key === state.filter);
+  const filter = state.filter === "media" ? MEDIA_FILTER : FILTERS.find((item) => item.key === state.filter);
   state.timer = setTimeout(async () => {
     try {
       const all = await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT });
       const shown = filter && !code
         ? await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT, kinds: filter.kinds }) : all;
       if (generation !== state.generation) return;
-      const counts = {};
-      if (code) counts.code = all.strong;
-      else for (const hit of all.hits.slice(0, all.strong)) {
-        const key = FILTER_OF_KIND[hit.kind];
-        counts[key] = (counts[key] || 0) + 1;
-      }
-      Object.assign(state, { counts, text, meaning: shown.meaning, hasResults: true, showWeaker: false,
-                             ranked: shown.hits.slice(0, shown.strong), weaker: shown.hits.slice(shown.strong) });
+      const strong = all.hits.slice(0, all.strong);   // whatever the filter: the chips count all of them
+      Object.assign(state, { counts: countsOf(strong), strong, text, meaning: shown.meaning, hasResults: true,
+                             showWeaker: false, ranked: shown.hits.slice(0, shown.strong),
+                             weaker: shown.hits.slice(shown.strong) });
       if (!rows().some((hit) => hit.path === state.selection)) state.selection = rows()[0]?.path ?? null;
       render();
       if (debugPending) report();
@@ -146,6 +155,7 @@ function render() {
   renderContent();
   renderSide();
   renderStatus();
+  renderBatch();
 }
 
 function renderBar() {
@@ -156,6 +166,10 @@ function renderBar() {
     : "Describe it: “receipt from the hardware store”, “zebra in a video”…";
   $kinds.replaceChildren();
   $kinds.append(chip("All", null, null, state.filter === null && !code, () => setFilter(null), 1));
+  if (isWindows) {
+    const media = state.filter === "media";
+    $kinds.append(chip("Media", null, mediaCount(), media, () => setFilter(media ? null : "media"), "M"));
+  }
   FILTERS.forEach((filter, index) => {
     const selected = state.filter === filter.key && !code;
     $kinds.append(chip(filter.title, filter.icon, code ? null : state.counts[filter.key], selected,
@@ -205,6 +219,10 @@ function grid() {
 
 function cells(hits, className) {
   const box = element("div", className);
+  if (className === "grid" && isWindows) {
+    box.setAttribute("role", "listbox");
+    box.setAttribute("aria-multiselectable", "true");
+  }
   for (const hit of hits) box.append(cell(hit));
   return box;
 }
@@ -212,12 +230,26 @@ function cells(hits, className) {
 /// A result in the grid: its picture in a fixed box (a picture's own shape never sizes the cell), what kind it is,
 /// the page or moment that matched, its name and folder.
 function cell(hit) {
-  const item = element("div", "cell" + (hit.path === state.selection ? " selected" : ""));
+  const chosen = state.selected.has(hit.path);
+  const item = element("div", "cell" + (hit.path === state.selection ? " selected" : "") + (chosen ? " checked" : ""));
   item.dataset.path = hit.path;
   item.setAttribute("role", "option");
+  item.setAttribute("aria-selected", String(chosen));
   item.setAttribute("aria-label", `${KIND_TITLE[hit.kind] || "File"}, ${nameOf(hit.path)}, ${reasonOf(hit)}`);
   const picture = element("div", "picture");
   picture.append(cellPicture(hit));
+  if (isWindows && MEDIA.has(hit.kind)) {
+    const box = element("button", "checkbox");
+    box.type = "button";
+    box.setAttribute("role", "checkbox");
+    box.setAttribute("aria-checked", String(chosen));
+    box.setAttribute("aria-label", `Select ${nameOf(hit.path)}`);
+    box.innerHTML = ICONS.check;
+    // Its press is its own: it neither starts a drag of the file nor takes the keyboard from the field.
+    box.onmousedown = (event) => { event.stopPropagation(); event.preventDefault(); };
+    box.onclick = (event) => { event.stopPropagation(); toggleSelected(hit.path); };
+    picture.append(box);
+  }
   if (hit.kind !== "image" && hit.kind !== "screenshot") {
     const badge = element("span", "kind-badge");
     badge.innerHTML = ICONS[hit.kind] || ICONS.doc;
@@ -291,11 +323,17 @@ function weakerToggle() {
   toggle.onmousedown = (event) => event.preventDefault();
   toggle.onclick = () => {
     state.showWeaker = !state.showWeaker;
+    // The weaker ones folded away take their files out of what's chosen.
+    const left = new Set(rows().map((hit) => hit.path));
+    for (const path of state.selected) if (!left.has(path)) state.selected.delete(path);
+    if (state.anchor && !left.has(state.anchor)) state.anchor = null;
     if (!rows().some((hit) => hit.path === state.selection)) state.selection = rows()[0]?.path ?? null;
     const scroll = $content.scrollTop;
     renderContent();
     $content.scrollTop = scroll;
     renderSide();
+    renderBatch();
+    renderStatus();
   };
   return toggle;
 }
@@ -365,18 +403,32 @@ function wire(item, hit) {
     window.addEventListener("mousemove", moved);
     window.addEventListener("mouseup", done);
   };
-  item.onclick = () => select(hit.path);
+  item.onclick = (event) => pick(hit, event);
   item.ondblclick = () => open(hit);
   item.oncontextmenu = (event) => {
     event.preventDefault();
-    select(hit.path);
-    showMenu(event.clientX, event.clientY, [
+    if (isWindows && MEDIA.has(hit.kind)) {
+      // On one of the chosen files: the menu works on all of them; on another: it chooses that one first.
+      if (!state.selected.has(hit.path)) { state.selected = new Set([hit.path]); state.anchor = hit.path; }
+      select(hit.path);
+      paintSelection();
+    } else {
+      clearSelection();
+      select(hit.path);
+    }
+    const chosen = selectedHits();
+    const items = [
       ["Open", () => open(hit)],
       [`Show in ${FILE_MANAGER}`, () => reveal(hit)],
       null,
       ["Copy", () => invoke("copy_file", { path: hit.path }).catch(failed)],
-      ["Copy Path", () => navigator.clipboard.writeText(hit.path).catch(() => {})],
-    ]);
+      [chosen.length > 1 ? "Copy Paths" : "Copy Path", copyPaths],
+    ];
+    if (isWindows && chosen.length) {
+      items.push(null, ["Move To…", () => moveOrCopy("move")], ["Copy To…", () => moveOrCopy("copy")],
+                 ["Delete (Recycle Bin)", confirmDelete]);
+    }
+    showMenu(event.clientX, event.clientY, items);
   };
 }
 
@@ -395,6 +447,430 @@ function move(step) {
   if (!shown.length) return;
   const index = shown.findIndex((hit) => hit.path === state.selection);
   select(shown[Math.max(0, Math.min(shown.length - 1, (index < 0 ? -1 : index) + step))].path);
+}
+
+// MARK: Choosing files
+
+/// The media results on show, once each: what Select All and the ranges go through (the whole list, not the part on
+/// screen). Documents and code aren't among them.
+function operable() {
+  const seen = new Set();
+  return rows().filter((hit) => {
+    if (!isWindows || !MEDIA.has(hit.kind) || seen.has(hit.path)) return false;
+    seen.add(hit.path);
+    return true;
+  });
+}
+
+/// The chosen results, in the order they're shown (a path chosen and since gone is left out).
+function selectedHits() {
+  const byPath = new Map(operable().map((hit) => [hit.path, hit]));
+  return [...state.selected].map((path) => byPath.get(path)).filter(Boolean);
+}
+
+function selectedSize(hits) {
+  return hits.reduce((sum, hit) => sum + (Number(hit.size) || 0), 0);
+}
+
+function clearSelection(paint = true) {
+  if (!state.selected.size && state.anchor == null) return;
+  state.selected.clear();
+  state.anchor = null;
+  if (paint) paintSelection();
+}
+
+function selectAll() {
+  state.selected = new Set(operable().map((hit) => hit.path));
+  state.anchor = state.selection;
+  paintSelection();
+}
+
+function toggleSelected(path) {
+  if (state.selected.has(path)) state.selected.delete(path);
+  else {
+    state.selected.add(path);
+    state.anchor = path;
+  }
+  state.navigated = true;
+  paintSelection();
+}
+
+/// A click on a result: one picks it (and only it), Ctrl adds or takes it away, Shift takes the range from the last
+/// one picked. A document or a piece of code can't be moved, copied or deleted: clicking one clears what was chosen.
+function pick(hit, event) {
+  if (!isWindows || !MEDIA.has(hit.kind)) {
+    clearSelection();
+    select(hit.path);
+    return;
+  }
+  const list = operable().map((item) => item.path);
+  if (event.shiftKey && state.anchor && list.includes(state.anchor) && list.includes(hit.path)) {
+    const from = list.indexOf(state.anchor), to = list.indexOf(hit.path);
+    if (!event.ctrlKey && !event.metaKey) state.selected.clear();
+    for (let index = Math.min(from, to); index <= Math.max(from, to); index += 1) state.selected.add(list[index]);
+  } else if (event.ctrlKey || event.metaKey) {
+    if (state.selected.has(hit.path)) state.selected.delete(hit.path);
+    else state.selected.add(hit.path);
+    state.anchor = hit.path;
+  } else {
+    state.selected = new Set([hit.path]);
+    state.anchor = hit.path;
+  }
+  select(hit.path);
+  paintSelection();
+}
+
+/// Shift+↑ ↓: the range from where the choosing started to the focus now, in the media list (a row at a time).
+function extendSelection(step) {
+  const list = operable().map((hit) => hit.path);
+  if (!list.length) return;
+  const at = list.indexOf(state.selection);
+  if (at < 0) return;   // the focus is on something that can't be moved: no range to take yet
+  const to = Math.max(0, Math.min(list.length - 1, at + step));
+  state.anchor = state.anchor && list.includes(state.anchor) ? state.anchor : list[to];
+  const from = Math.max(0, list.indexOf(state.anchor));
+  state.selected.clear();
+  for (let index = Math.min(from, to); index <= Math.max(from, to); index += 1) state.selected.add(list[index]);
+  select(list[to]);
+  paintSelection();
+}
+
+/// The chosen files' checkboxes and the panel, without rebuilding the grid (which would lose the scroll place).
+function paintSelection() {
+  for (const item of $content.querySelectorAll("[data-path]")) {
+    const chosen = state.selected.has(item.dataset.path);
+    item.classList.toggle("checked", chosen);
+    item.setAttribute("aria-selected", String(chosen));
+    item.querySelector(".checkbox")?.setAttribute("aria-checked", String(chosen));
+  }
+  renderBatch();
+  renderSide();
+  renderStatus();
+}
+
+function copyPaths() {
+  const chosen = selectedHits();
+  const paths = chosen.length ? chosen.map((hit) => hit.path) : [state.selection].filter(Boolean);
+  if (!paths.length) return;
+  navigator.clipboard.writeText(paths.join("\n")).catch(() => {});
+}
+
+/// All · Media 14 · Screenshots 4 · …: the media count is the four kinds together.
+function mediaCount() {
+  return ["screenshots", "images", "video", "audio"].reduce((sum, key) => sum + (state.counts[key] || 0), 0);
+}
+
+/// The chips' numbers from a list of strong results.
+function countsOf(hits) {
+  if (isCode()) return { code: hits.length };
+  const counts = {};
+  for (const hit of hits) {
+    const key = FILTER_OF_KIND[hit.kind];
+    if (key) counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
+}
+
+// MARK: Moving, copying and deleting
+
+let operationNumber = 0;   // the window's number for its operations, which cancel and the events go by
+let operationView = null;  // the sheet's bar, line and Cancel while an operation runs
+let operationSheet = null; // the timer that shows the sheet only if the work takes a moment
+let noteTimer = null;
+
+/// The bar between the results and the status bar: how much is chosen and what can be done with it.
+function renderBatch() {
+  const items = operable();
+  $batch.hidden = !items.length;
+  if ($batch.hidden) return;
+  const chosen = selectedHits();
+  $batchSummary.textContent = chosen.length
+    ? `${chosen.length.toLocaleString()} selected · ${bytes(selectedSize(chosen))}`
+    : "Select files to copy, move, or delete";
+  $("batch-all").disabled = chosen.length === items.length;
+  $("batch-none").disabled = !chosen.length;
+  for (const id of ["batch-paths", "batch-copy", "batch-move", "batch-delete"]) $(id).disabled = !chosen.length;
+}
+
+/// What `file_operation` takes: the size and date the search knew, so a file that changed since then is left alone.
+function chosenItems(files) {
+  return files.map((hit) => ({ path: hit.path, size: hit.size ?? null, mtime: hit.modified ?? null }));
+}
+
+/// Move To… / Copy To…: the folder (the system's picker), then a sheet saying what will happen, then the work.
+async function moveOrCopy(kind) {
+  const files = selectedHits();
+  if (!isWindows || !files.length || state.busy || !$modal.hidden) return;
+  let destination = null;
+  try {
+    destination = await invoke("pick_destination_folder", {
+      title: kind === "move" ? "Move to Folder" : "Copy to Folder",
+    });
+  } catch (error) {
+    failed(error);
+    return;
+  }
+  if (!destination) return;
+  const box = element("div", "modal-box");
+  box.append(element("h2", "", `${kind === "move" ? "Move" : "Copy"} ${countOf(files.length, "file")}?`));
+  box.append(element("div", "modal-path", destination));
+  box.append(element("p", "", `${bytes(selectedSize(files))} · nothing is overwritten: a name that's taken gets a number `
+    + `(photo (2).jpg).`));
+  const actions = element("div", "modal-actions");
+  const cancel = element("button", "", "Cancel");
+  cancel.onclick = closeModal;
+  const go = element("button", "primary", kind === "move" ? "Move" : "Copy");
+  go.onclick = () => operate(kind, destination, files);
+  actions.append(cancel, go);
+  box.append(actions);
+  showModal(box);
+}
+
+/// Delete: always to the Recycle Bin, and always with this sheet in between.
+function confirmDelete() {
+  const files = selectedHits();
+  if (!isWindows || !files.length || state.busy || !$modal.hidden) return;
+  const box = element("div", "modal-box");
+  box.append(element("h2", "", `Move ${files.length === 1 ? "this file" : `${files.length} files`} to the Recycle Bin?`));
+  box.append(element("p", "", `${bytes(selectedSize(files))}. You can put ${files.length === 1 ? "it" : "them"} back `
+    + `from the Recycle Bin.`));
+  const actions = element("div", "modal-actions");
+  const cancel = element("button", "", "Cancel");
+  cancel.onclick = closeModal;
+  const go = element("button", "danger", "Move to Recycle Bin");
+  go.onclick = () => operate("delete", null, files);
+  actions.append(cancel, go);
+  box.append(actions);
+  showModal(box);
+}
+
+function countOf(count, one) {
+  return `${count.toLocaleString()} ${count === 1 ? one : `${one}s`}`;
+}
+
+async function operate(kind, destination, files) {
+  if (state.busy || !files.length) return;
+  hideReport();   // this operation's report replaces the last one's
+  const id = ++operationNumber;
+  state.busy = { id, kind, done: 0, total: files.length, path: null, destination, bytes: null, size: null };
+  // A single quick file shouldn't flash a sheet; a copy that takes a while gets its bar and Cancel.
+  operationSheet = setTimeout(() => {
+    operationSheet = null;
+    if (state.busy?.id !== id) return;
+    showModal(operationBox());
+    renderOperation();
+  }, 300);
+  try {
+    const report = await invoke("file_operation", {
+      request: { kind, id, destination, items: chosenItems(files) },
+    });
+    finishOperation(report);
+  } catch (error) {
+    clearTimeout(operationSheet);
+    operationSheet = null;
+    state.busy = null;
+    operationView = null;
+    hideModal();
+    failed(error);
+  }
+}
+
+function operationBox() {
+  const { kind, total, destination } = state.busy;
+  const box = element("div", "modal-box");
+  box.append(element("h2", "", `${verbOf(kind)} ${countOf(total, "file")}…`));
+  if (destination) box.append(element("div", "modal-path", destination));
+  const bar = element("div", "modal-progress");
+  const fill = element("span");
+  bar.append(fill);
+  const line = element("div", "modal-line", `0 of ${total.toLocaleString()}`);
+  const cancel = element("button", "", "Cancel");
+  cancel.onclick = cancelOperation;
+  const actions = element("div", "modal-actions");
+  actions.append(cancel);
+  box.append(bar, line, actions);
+  operationView = { fill, line, cancel };
+  return box;
+}
+
+function renderOperation() {
+  if (!state.busy || !operationView) return;
+  const { done, total, path, bytes, size } = state.busy;
+  const shown = Math.min(done, total);
+  // A copy reports the file it's in by the byte, so the bar moves through a big one too.
+  const partial = bytes != null && size ? Math.min(bytes / size, 1) : 0;
+  const fraction = total ? Math.min((shown + partial) / total, 1) : 0;
+  operationView.fill.style.width = `${Math.round(fraction * 100)}%`;
+  operationView.line.textContent = `${shown.toLocaleString()} of ${total.toLocaleString()}`
+    + (path ? ` — ${nameOf(path)}` : "") + (partial > 0 && partial < 1 ? ` (${Math.round(partial * 100)}%)` : "");
+}
+
+function cancelOperation() {
+  if (!state.busy || !operationView || operationView.cancel.disabled) return;
+  invoke("cancel_file_operation", { id: state.busy.id }).catch(() => {});
+  operationView.cancel.disabled = true;
+  operationView.cancel.textContent = "Cancelling…";
+}
+
+function verbOf(kind) {
+  return kind === "move" ? "Moving" : kind === "copy" ? "Copying" : "Moving to the Recycle Bin";
+}
+
+function finishOperation(report) {
+  clearTimeout(operationSheet);
+  operationSheet = null;
+  const files = report.items.filter((item) => item.ok);
+  state.busy = null;
+  operationView = null;
+  if (report.kind === "copy") {
+    clearSelection();
+    renderBatch();
+  } else {
+    // The rows of the files that left are gone; the ones that failed or were skipped stay, and stay chosen, so they can
+    // be tried again.
+    forget(files.map((item) => item.from), report.items.filter((item) => !item.ok).map((item) => item.from));
+  }
+  hideModal();
+  renderReport(report);
+  setNote(operationNote(report));
+}
+
+/// Moved 10 files · 2 renamed · 1 failed (or Stopped: moved 4 of 12).
+function operationNote(report) {
+  const verb = report.kind === "move" ? "Moved" : report.kind === "copy" ? "Copied" : "Deleted";
+  let text = report.cancelled ? `Stopped: ${verb.toLowerCase()} ${report.done} of ${report.total}`
+    : `${verb} ${countOf(report.done, "file")}`;
+  if (report.renamed) text += ` · ${report.renamed} renamed`;
+  if (report.failed) text += ` · ${report.failed} failed`;
+  if (report.skipped) text += ` · ${report.skipped} skipped`;
+  if (report.index === false) text += " · index update failed; resyncing";
+  return text;
+}
+
+/// How many lines of a list show before "Show all": a batch of thousands opens on its summary, not on a screen of
+/// names, and the full list is one click away.
+const REPORT_SHOWN = 8;
+
+/// What happened, under the results rather than in a sheet: renamed names and files that didn't go stay here until the
+/// next operation, without a click to put them away. A clean operation has only the status bar's line.
+function renderReport(report) {
+  const renamed = report.items.filter((item) => item.ok && item.renamed);
+  const problems = report.items.filter((item) => !item.ok);
+  const failedIndex = report.index === false;
+  if (!renamed.length && !problems.length && !failedIndex) {
+    hideReport();
+    return;
+  }
+  $report.replaceChildren();
+  $report.append(element("div", "report-head", operationNote(report)));
+  if (failedIndex) {
+    $report.append(element("div", "report-why",
+      "The index couldn't follow the files that changed; DigUp is rescanning your folders."));
+  }
+  if (renamed.length) {
+    $report.append(element("div", "report-label", "Renamed"),
+      element("div", "report-why", "The names were taken, so DigUp added a number."));
+    $report.append(reportList(renamed, (item) =>
+      element("li", "name", `${nameOf(item.from)} → ${nameOf(item.to)}`)));
+  }
+  if (problems.length) {
+    $report.append(element("div", "report-label", "Not done"));
+    $report.append(reportList(problems, (item) => {
+      const line = element("li");
+      line.append(element("div", "name", nameOf(item.from)), element("div", "why", item.error || "it wasn't done"));
+      return line;
+    }));
+  }
+  $report.hidden = false;
+}
+
+/// A report's list: the first few lines, and "Show all" for a batch too big to read at a glance. The full list is made
+/// once, on the click, so a move of thousands doesn't put thousands of rows on the page for nothing.
+function reportList(items, line) {
+  const list = element("ul", "report-list");
+  const fill = (count) => {
+    list.replaceChildren();
+    for (const item of items.slice(0, count)) list.append(line(item));
+  };
+  fill(REPORT_SHOWN);
+  if (items.length <= REPORT_SHOWN) return list;
+  const wrap = element("div");
+  const more = element("button", "report-more", `Show all ${items.length.toLocaleString()}`);
+  more.onclick = () => {
+    fill(items.length);
+    $report.classList.add("expanded");
+    more.remove();
+  };
+  wrap.append(list, more);
+  return wrap;
+}
+
+/// Puts the last operation's details away: a new search or operation starts clean.
+function hideReport() {
+  $report.hidden = true;
+  $report.classList.remove("expanded");
+  $report.replaceChildren();
+}
+
+/// Takes the files that moved or were deleted out of the results: their rows, the chips' numbers, the selection. The
+/// place on screen stays where it was.
+function forget(paths, stay = []) {
+  if (!paths.length) return;
+  const gone = new Set(paths);
+  const before = rows();
+  const at = before.findIndex((hit) => hit.path === state.selection);
+  const scroll = $content.scrollTop;
+  const keep = (hit) => !gone.has(hit.path);
+  state.ranked = state.ranked.filter(keep);
+  state.weaker = state.weaker.filter(keep);
+  state.strong = state.strong.filter(keep);
+  state.counts = countsOf(state.strong);
+  const after = rows();
+  state.selected = new Set(stay.filter((path) => after.some((hit) => hit.path === path)));
+  state.anchor = stay[stay.length - 1] ?? null;
+  state.selection = state.selection && !gone.has(state.selection) ? state.selection
+    : after[Math.min(Math.max(at, 0), after.length - 1)]?.path ?? null;
+  renderBar();
+  renderContent();
+  $content.scrollTop = scroll;
+  renderSide();
+  renderStatus();
+  renderBatch();
+  if (!$big.hidden) renderBig();
+}
+
+/// For a moment after an operation, the status bar's right side says what happened.
+function setNote(text) {
+  state.note = text;
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => {
+    state.note = null;
+    renderStatus();
+  }, 10000);
+  renderStatus();
+}
+
+// MARK: Sheets
+
+function showModal(box) {
+  state.sheet = true;
+  const title = box.querySelector("h2");
+  if (title) title.id = "modal-title";
+  $modal.replaceChildren(box);
+  $modal.hidden = false;
+  box.querySelector("button.primary, button.danger, button")?.focus({ preventScroll: true });
+}
+
+function hideModal() {
+  $modal.hidden = true;
+  $modal.replaceChildren();
+  state.sheet = false;
+}
+
+function closeModal() {
+  if (state.busy) return;   // an operation under way closes its own sheet, with what happened
+  hideModal();
+  $query.focus();
 }
 
 /// The grid's columns right now (↑ ↓ move by a row); a list has one.
@@ -543,11 +1019,36 @@ let playing = null;   // the audio of the selected result, while it plays
 
 function renderSide() {
   stopPlaying();
-  const hit = state.hasResults && !state.codePhase && state.query.trim() ? selectedHit() : null;
+  const shown = state.hasResults && !state.codePhase && state.query.trim();
+  const chosen = shown && isWindows ? selectedHits() : [];
+  if (chosen.length > 1) {
+    $side.hidden = !state.showsPreview;
+    $side.replaceChildren(summaryOf(chosen));
+    return;
+  }
+  const hit = shown ? selectedHit() : null;
   $side.hidden = !state.showsPreview || !hit;
   $side.replaceChildren();
   if (!hit) return;
   $side.append(previewPicture(hit), facts(hit), why(hit), actions(hit));
+}
+
+/// Several files chosen: the count and size they add up to, and each one's name and size.
+function summaryOf(hits) {
+  const box = element("div");
+  const head = element("div", "summary");
+  head.append(element("strong", "", `${hits.length} files`), element("span", "", bytes(selectedSize(hits))));
+  const list = element("ul", "summary-list");
+  for (const hit of hits.slice(0, 30)) {
+    const item = element("li");
+    item.title = hit.path;
+    item.append(element("span", "summary-name", nameOf(hit.path)),
+                element("span", "summary-size", bytes(Number(hit.size) || 0)));
+    list.append(item);
+  }
+  if (hits.length > 30) list.append(element("li", "summary-size", `and ${hits.length - 30} more`));
+  box.append(head, list);
+  return box;
 }
 
 /// The big picture: the photo or screenshot, the frame at the moment (it plays from there), the page, the moment in a
@@ -868,7 +1369,10 @@ function renderStatus() {
       + `cy="6" r="4.6" stroke-dasharray="${(length * Math.max(0.02, app.progress)).toFixed(2)} ${length.toFixed(2)}"/></svg>`;
   }
   let count = "";
+  const chosen = isWindows && state.hasResults && state.query.trim() ? selectedHits() : [];
   if (state.error) count = `DigUp's helper: ${state.error}`;
+  else if (state.note) count = state.note;
+  else if (chosen.length) count = `${chosen.length.toLocaleString()} selected · ${bytes(selectedSize(chosen))}`;
   else if (state.hasResults && state.query.trim()) {
     const strong = state.ranked.length, weaker = state.weaker.length;
     count = app.caveat || (!state.meaning ? "Words only: meaning search isn't available"
@@ -971,6 +1475,16 @@ $("more").onclick = () => ($menu.hidden ? showMainMenu() : hideMenu());
 $("status-line").onclick = () => invoke("choose_folders").catch(failed);
 $("update").onclick = () => invoke("offer_update").catch(failed);
 $kinds.onmousedown = (event) => event.preventDefault();
+// The chosen files' bar: its buttons take the clicks but not the keyboard (typing stays in the field).
+$batch.onmousedown = (event) => { if (event.target.closest("button")) event.preventDefault(); };
+$("batch-all").onclick = selectAll;
+$("batch-none").onclick = () => clearSelection();
+$("batch-paths").onclick = copyPaths;
+$("batch-copy").onclick = () => moveOrCopy("copy");
+$("batch-move").onclick = () => moveOrCopy("move");
+$("batch-delete").onclick = confirmDelete;
+// A click beside a confirmation puts it away; an operation under way has its own Cancel.
+$modal.onmousedown = (event) => { if (event.target === $modal && !state.busy) closeModal(); };
 
 function updatePreviewButton() {
   const button = $("toggle-preview");
@@ -983,9 +1497,40 @@ document.addEventListener("keydown", (event) => {
   if (event.isComposing) return;   // an input method is composing: its keys
   const modifier = isMac ? event.metaKey : event.ctrlKey;
   const plain = !event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey;
+  if (!$modal.hidden) {
+    // A sheet has the keyboard: its buttons answer Enter and Space; Tab goes round them; Escape puts it away (or asks
+    // an operation to stop).
+    if (event.key === "Tab") {
+      const buttons = [...$modal.querySelectorAll("button:not(:disabled)")];
+      event.preventDefault();
+      if (!buttons.length) return;
+      const at = buttons.indexOf(document.activeElement);
+      const next = event.shiftKey ? (at <= 0 ? buttons.length - 1 : at - 1) : (at + 1) % buttons.length;
+      buttons[next].focus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      if (state.busy) cancelOperation();
+      else closeModal();
+    }
+    return;
+  }
   if (!$menu.hidden && event.key === "Escape") {
     event.preventDefault();
     hideMenu();
+    return;
+  }
+  // A button with the keyboard answers Enter and Space itself (a checkbox's tick, a sheet's, the bar's).
+  if (event.target instanceof Element && event.target.closest("button") && (event.key === "Enter" || event.key === " ")) {
+    return;
+  }
+  // Select All: outside the field, where Ctrl+A is the text's (inside it, the field keeps its own).
+  if (modifier && !event.altKey && event.key.toLowerCase() === "a") {
+    if (!isWindows) return;
+    // In the field Ctrl+A is the text's; Ctrl+Shift+A still clears what's chosen.
+    if (document.activeElement === $query && !event.shiftKey) return;
+    event.preventDefault();
+    if (event.shiftKey) clearSelection();
+    else selectAll();
     return;
   }
   if (modifier && !event.altKey && !event.shiftKey) {
@@ -1012,6 +1557,12 @@ document.addEventListener("keydown", (event) => {
       case "c":
         copyResult(event, state.hasResults && state.query.trim() ? selectedHit() : null, state.navigated);
         return;
+      case "m":
+        // The Media chip (a key of its own: Ctrl+1…7 are the kinds' and don't move).
+        if (!isWindows) return;
+        event.preventDefault();
+        setFilter(state.filter === "media" ? null : "media");
+        return;
       case "f":
       case "l":
         event.preventDefault();
@@ -1030,9 +1581,42 @@ document.addEventListener("keydown", (event) => {
       return;
     case "ArrowDown":
     case "ArrowUp":
+      // Shift takes the range from where choosing started to here (in the media list, a row at a time).
+      if (event.shiftKey) {
+        if (event.altKey || event.ctrlKey || event.metaKey || !isWindows || !rows().length) return;
+        event.preventDefault();
+        extendSelection(event.key === "ArrowDown" ? 1 : -1);
+        return;
+      }
       if (!plain || !rows().length) return;
       event.preventDefault();
       move(event.key === "ArrowDown" ? columns() : -columns());
+      return;
+    case "Insert": {
+      // Add the one under the cursor to what's chosen (or take it away) and move on.
+      const hit = state.hasResults && state.query.trim() ? selectedHit() : null;
+      if (!hit || !isWindows || !MEDIA.has(hit.kind)) return;
+      event.preventDefault();
+      toggleSelected(hit.path);
+      move(1);
+      return;
+    }
+    case "Delete":
+      // Only outside the field: there it deletes text.
+      if (!isWindows || document.activeElement === $query || !selectedHits().length) return;
+      event.preventDefault();
+      confirmDelete();
+      return;
+    case "F5":
+    case "F6":
+    case "F8":
+      // Taken even with nothing chosen: the web view must not reload the window on them.
+      if (!isWindows) return;
+      event.preventDefault();
+      if (!selectedHits().length) return;
+      if (event.key === "F5") moveOrCopy("copy");
+      else if (event.key === "F6") moveOrCopy("move");
+      else confirmDelete();
       return;
     case "ArrowLeft":
     case "ArrowRight":
@@ -1051,6 +1635,11 @@ document.addEventListener("keydown", (event) => {
       return;
     }
     case "Escape":
+      if (state.selected.size) {
+        event.preventDefault();
+        clearSelection();
+        return;
+      }
       if (!$big.hidden) {
         event.preventDefault();
         closeBig();
@@ -1085,6 +1674,20 @@ tauri.event.listen("window-search", ({ payload }) => {
   state.filter = payload.kind || null;
   setQuery(payload.query || "");
   $query.focus();
+});
+
+// The files being moved, copied or deleted: the sheet's line moves along. The report comes back from the command
+// itself, so `done` here only closes the gap before it.
+tauri.event.listen("file-op", ({ payload }) => {
+  if (!state.busy || payload.id !== state.busy.id) return;
+  if (payload.phase === "progress") {
+    state.busy.done = payload.done;
+    state.busy.path = payload.path;
+    // A copy's byte-by-byte events carry bytes/size; the one after each file doesn't.
+    state.busy.bytes = payload.bytes ?? null;
+    state.busy.size = payload.size ?? null;
+    renderOperation();
+  }
 });
 
 window.addEventListener("focus", () => ask({ op: "prewarm" }).catch(() => {}));

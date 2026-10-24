@@ -174,6 +174,53 @@ import WinSDK
         #expect(try store.pendingCount() == 2)
         #expect(try store.prune(keepingUnder: chosen.map(\.path)) == 0)
     }
+
+    @Test func aMoveKeepsTheVectorsAndTakesTheNewPlacesIdentity() throws {
+        let store = try IndexStore(directory: folder)
+        let id = try store.insert(file("/a/photo.png", inode: 1))
+        try store.addSegment(file: id, kind: .image, modality: .image, vector: [1, 0, 0])
+        try store.finish(id, state: "done", info: ["width": "10"])
+        try store.move(id, to: "/b/photo.png", inode: 99, device: 7, size: 12, mtime: 2)
+        let moved = try #require(try store.file(id))
+        #expect(moved.path == "/b/photo.png")
+        #expect(moved.inode == 99 && moved.device == 7 && moved.size == 12 && moved.mtime == 2)
+        #expect(moved.state == "done")   // the move didn't queue it to be read again
+        #expect(try store.file(at: "/a/photo.png") == nil)
+        var vectors = 0
+        try store.db.query("SELECT COUNT(vec) FROM segments WHERE file = ?", [.int(id)]) { vectors = Int($0.int(0)) }
+        #expect(vectors == 1)   // nothing was embedded again
+        var name = ""
+        try store.db.query("""
+            SELECT name FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ? AND kind = 'name')
+            """, [.int(id)]) { name = $0.text(0) ?? "" }
+        #expect(name.contains("photo"))   // keyword search follows the file's name
+    }
+
+    @Test func aFileMovedOrDeletedWhileItWasReadIsntWrittenAgain() throws {
+        let store = try IndexStore(directory: folder)
+        let id = try store.insert(file("/a/x.png", inode: 1))
+        let read = try #require(try store.file(id))
+        let indexer = try Indexer(store: store, options: IndexOptions(), makeEmbedder: { FakeEmbedder() })
+        #expect(try indexer.stillIndexed(read))
+        try store.move(id, to: "/b/x.png")
+        #expect(try !indexer.stillIndexed(read))
+        try store.delete(id)
+        #expect(try !indexer.stillIndexed(read))
+    }
+
+    @Test func deleteTakesTheKeywordTextAndSegmentsWithIt() throws {
+        let store = try IndexStore(directory: folder)
+        let id = try store.insert(file("/a/notes.txt", inode: 1))
+        try store.addSegment(file: id, kind: .chunk, modality: .text, loc: 1, text: "zorblat", vector: [1])
+        try store.delete(id)
+        #expect(try store.file(id) == nil)
+        #expect(try store.file(at: "/a/notes.txt") == nil)
+        var rows = 0
+        try store.db.query("SELECT COUNT(*) FROM fts") { rows = Int($0.int(0)) }
+        #expect(rows == 0)   // the name entry and the chunk's text went with the file
+        try store.db.query("SELECT COUNT(*) FROM segments") { rows = Int($0.int(0)) }
+        #expect(rows == 0)
+    }
 }
 
 /// Sets an environment variable of this process, or removes it (nil).

@@ -193,6 +193,41 @@ svg { display: block; }
 }
 .cell.selected .picture { box-shadow: 0 0 0 3px var(--accent); }
 
+/* Choosing files for Move To, Copy To and Delete: a tick in the corner, shown as the pointer comes over the cell (or
+   the tick has the keyboard), and a tint on the ones chosen. */
+.cell .checkbox {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.38);
+  color: white;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.cell .checkbox svg { width: 13px; height: 13px; opacity: 0; }
+.cell:hover .checkbox, .cell:focus-within .checkbox, .cell.checked .checkbox { opacity: 1; }
+.cell.checked .checkbox { background: var(--accent); border-color: transparent; }
+.cell.checked .checkbox svg { opacity: 1; }
+.cell.checked .picture { box-shadow: 0 0 0 3px var(--accent), inset 0 0 0 999px color-mix(in srgb, var(--accent) 14%, transparent); }
+.cell .checkbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* One chosen file in the side panel: how many, how much, and each one's name and size. */
+.summary { display: flex; align-items: baseline; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.summary strong { font-size: 14px; }
+.summary span { font-size: 12px; color: var(--secondary); }
+.summary-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.summary-list li { display: flex; align-items: baseline; gap: 10px; }
+.summary-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summary-size { flex: none; color: var(--secondary); font-variant-numeric: tabular-nums; }
+
 .cell .picture img { width: 100%; height: 100%; object-fit: cover; }
 .cell .picture img.page { object-position: top; }
 .cell .picture .big-icon svg { width: 46px; height: 46px; fill: none; stroke: var(--ember); stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
@@ -590,6 +625,59 @@ svg { display: block; }
 .side .message { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 6px; color: var(--secondary); padding: 0 12px; }
 .side .message strong { color: var(--text); font-size: 14px; }
 
+/* The chosen files' bar, between the results and the status bar (only where Move To, Copy To and Delete work) */
+
+.batch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--pane);
+  font-size: 12px;
+}
+.batch .batch-summary { color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.batch .spacer { flex: 1; }
+.batch button { padding: 4px 9px; font-size: 12px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--accent); }
+.batch button:hover:not(:disabled) { background: var(--fill); }
+.batch button.danger { color: #d7443e; }
+.batch button:disabled { opacity: 0.45; }
+.batch .batch-divider { width: 1px; height: 18px; margin: 0 2px; background: var(--line); }
+.batch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* What happened after a move, copy or delete: the names that changed, the files that didn't go. No sheet to dismiss;
+   a clean operation is just the status bar's line. */
+
+.report {
+  flex: none;
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--fill);
+  font-size: 12px;
+}
+.report.expanded { max-height: 40vh; }
+.report .report-head { font-weight: 600; }
+.report .report-why { margin-top: 2px; color: var(--secondary); }
+.report .report-label { margin-top: 6px; color: var(--secondary); }
+.report .report-list { list-style: none; margin: 2px 0 0; padding: 0; }
+.report .report-list li { padding: 2px 0; overflow-wrap: anywhere; }
+.report .report-list .why { color: var(--secondary); }
+.report .report-more {
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.report .report-more:hover { text-decoration: underline; }
+.report .report-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* The status bar */
 
 .status {
@@ -644,6 +732,38 @@ svg { display: block; }
 .menu .shortcut { color: var(--tertiary); }
 .menu button:hover:not(:disabled) .shortcut { color: rgba(255, 255, 255, 0.8); }
 .menu hr { border: 0; height: 1px; margin: 5px 4px; background: var(--line); }
+
+/* A sheet over the window: a confirmation, or an operation's progress */
+
+.modal { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, 0.38); }
+.modal-box {
+  width: min(440px, 100%);
+  padding: 20px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35), 0 0 0 0.5px var(--fill-strong);
+}
+.modal-box h2 { margin: 0; font-size: 15px; }
+.modal-box p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--secondary); }
+.modal-path {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--fill);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.modal-progress { margin-top: 16px; height: 6px; border-radius: 99px; background: var(--fill); overflow: hidden; }
+.modal-progress span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.12s linear; }
+.modal-line { margin-top: 8px; font-size: 12px; color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.modal-actions { margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px; }
+.modal-actions button { padding: 5px 14px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.modal-actions button.primary { background: var(--accent); border-color: transparent; color: white; }
+.modal-actions button.danger { background: #d7443e; border-color: transparent; color: white; }
+.modal-actions button:disabled { opacity: 0.5; }
+.modal-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* The big preview (Space): the selected result over the window, as big as it allows. */
 .big { position: fixed; inset: 0; z-index: 20; display: flex; padding: 24px; background: rgba(0, 0, 0, 0.45); }

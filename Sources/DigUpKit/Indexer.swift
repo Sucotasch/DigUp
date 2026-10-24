@@ -87,9 +87,43 @@ public final class Indexer {
 
     /// Crawls `roots` and reconciles the index: new files are queued, changed ones re-queued, moved ones re-pathed
     /// (no re-embedding), and files that are gone or newly excluded are removed.
-    public func sync(_ roots: [URL], progress: ((CrawlProgress) -> Void)? = nil) throws -> SyncSummary {
-        let crawl = Crawler.crawl(roots, options: options, progress: progress)
-        let existing = try store.files(under: roots.map { $0.standardizedFileURL.path })
+    /// `changedPaths` limits reconciliation to their affected folders; nil requests a full sync, [] does nothing.
+    public func sync(_ roots: [URL], changedPaths: [String]? = nil,
+                     progress: ((CrawlProgress) -> Void)? = nil) throws -> SyncSummary {
+        let roots = roots.map { URL(fileURLWithPath: FolderSelection.crawlPath($0.path), isDirectory: true) }
+        // A file event reconciles its containing directory: besides handling deletes and atomic saves, this
+        // keeps folder-level rules (notably dataset detection) correct. Directory events walk that subtree.
+        // Paths outside selected roots cannot affect this index.
+        let scopes: [URL]? = changedPaths.map { paths in
+            var selected = Set<String>()
+            for raw in paths {
+                let path = FolderSelection.crawlPath(raw)
+                guard let root = roots.filter({
+                    FolderSelection.isInside(path, $0.path) || path == $0.path
+                })
+                    .max(by: { $0.path.count < $1.path.count }) else { continue }
+                var isDirectory: ObjCBool = false
+                let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+                let scopePath = exists && isDirectory.boolValue ? path : (path as NSString).deletingLastPathComponent
+                guard FolderSelection.isInside(scopePath, root.path) || scopePath == root.path else { continue }
+                selected.insert(scopePath)
+            }
+            // Drop nested scopes when an ancestor already covers them.
+            return selected.sorted().filter { path in
+                !selected.contains { other in other != path && FolderSelection.isInside(path, other) }
+            }.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        }
+        // A broader scope may cross an exclusion that contains an explicitly selected subfolder. Walk that
+        // selection on its own as a full sync does, otherwise reconciling the broad scope would remove its rows.
+        let walkRoots = scopes.map { scopes in
+            scopes + roots.filter { root in
+                scopes.contains { FolderSelection.isInside(root.path, $0.path) }
+            }
+        } ?? roots
+        let crawl = Crawler.crawl(walkRoots, options: options, chosenRoots: roots, progress: progress)
+        let pathsToReconcile = scopes?.map(\.path) ?? roots.map(\.path)
+        guard !pathsToReconcile.isEmpty else { return SyncSummary(crawl: crawl) }
+        let existing = try store.files(under: pathsToReconcile)
         var byPath: [String: FileRecord] = [:]
         var byInode: [String: FileRecord] = [:]
         for file in existing {
@@ -121,7 +155,7 @@ public final class Indexer {
             }
             // A root that went away while it was being walked (a drive ejected mid-crawl) looked emptier than it is:
             // keep its rows rather than take that for "deleted".
-            let vanished = roots.map { $0.standardizedFileURL.path }
+            let vanished = roots.map(\.path)
                 .filter { !FileManager.default.fileExists(atPath: $0) }.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
             for row in existing where !seen.contains(row.path) && !movedFrom.contains(row.path)
                 && !vanished.contains(where: { row.path.hasPrefix($0) }) {
@@ -483,14 +517,28 @@ public final class Indexer {
 
     // MARK: Commit (the indexing thread: the model and the database)
 
+    /// Whether the index still has this file where it was read from. A move or a delete while it's being read changes
+    /// who its row belongs to, or takes the row away: what was read mustn't be written to it then.
+    func stillIndexed(_ file: FileRecord) throws -> Bool {
+        guard let row = try store.file(file.id) else { return false }
+        return row.path == file.path && row.size == file.size && abs(row.mtime - file.mtime) < 0.001
+    }
+
     private func commit(_ prepared: Prepared) throws -> [(String, String?)] {
         let batch = prepared.batch
         let later = prepared.step != nil
+        // One check per file, before anything is written: `file_op` in the search helper moves and deletes files while
+        // the index helper may be reading them (the two are processes of their own).
+        var current: [Bool] = []
+        for file in batch { current.append(try stillIndexed(file)) }
+        let went = "moved or deleted while it was being read"
         if let step = prepared.step, let outcome = prepared.outcomes[0] {
+            guard current[0] else { return [("skipped", went)] }
             return [try stopReading(batch[0], at: step.lowerBound, because: outcome.detail ?? outcome.state)]
         }
         var results = [(String, String?)](repeating: ("failed", nil), count: batch.count)
-        for (slot, outcome) in prepared.outcomes {
+        for slot in batch.indices where !current[slot] { results[slot] = ("skipped", went) }
+        for (slot, outcome) in prepared.outcomes where current[slot] {
             try store.finish(batch[slot].id, state: outcome.state, detail: outcome.detail)
             results[slot] = (outcome.state, outcome.detail)
         }
@@ -499,17 +547,22 @@ public final class Indexer {
             case .nothing:
                 break
             case .images(let screenshot, let ready):
-                try images(batch, screenshot: screenshot, ready: ready, results: &results)
+                try images(batch, screenshot: screenshot, ready: ready.filter { current[$0.slot] }, results: &results)
             case .pdf(let pages, let read, let total, let title):
+                guard current[0] else { break }
                 results[0] = try pdf(batch[0], pages: pages, read: read, total: total, title: title, later: later)
             case .doc(let chunks, let read, let total, let characters):
+                guard current[0] else { break }
                 results[0] = try doc(batch[0], chunks: chunks, read: read, total: total, characters: characters,
                                      later: later)
             case .audio(let pieces, let duration):
+                guard current[0] else { break }
                 results[0] = try audio(batch[0], pieces: pieces, duration: duration)
             case .video(let frames, let sound, let duration):
+                guard current[0] else { break }
                 results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration)
             case .code(let code):
+                guard current[0] else { break }
                 results[0] = try self.code(batch[0], code)
             }
         } catch let error as WorkerError {
@@ -517,10 +570,18 @@ public final class Indexer {
         } catch let error as IndexerError {
             throw error
         } catch {
-            if let step = prepared.step { return [try stopReading(batch[0], at: step.lowerBound, because: "\(error)")] }
-            for (slot, file) in batch.enumerated() where prepared.outcomes[slot] == nil {
-                try store.finish(file.id, state: "failed", detail: "\(error)")
-                results[slot] = ("failed", "\(error)")
+            if let step = prepared.step {
+                guard current[0] else { return [("skipped", went)] }
+                return [try stopReading(batch[0], at: step.lowerBound, because: "\(error)")]
+            }
+            for (slot, file) in batch.enumerated() where prepared.outcomes[slot] == nil && current[slot] {
+                // A row deleted between the check and the writes: the file went, which isn't a failure to read it.
+                if (try? store.file(file.id)) == nil {
+                    results[slot] = ("skipped", went)
+                } else {
+                    try store.finish(file.id, state: "failed", detail: "\(error)")
+                    results[slot] = ("failed", "\(error)")
+                }
             }
         }
         return results

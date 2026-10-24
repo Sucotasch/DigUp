@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Writes the third-party notices DigUp's Windows and Linux packages carry: the license of every library they ship, from
 the libraries' own license files (llama.cpp's and PDFium's from Vendor/, ffmpeg's, dav1d's and zlib's from the small
-ffmpeg scripts/build-ffmpeg.sh makes, Swift's from the toolchain or scripts/licenses), and of every Rust crate the app
-is built from (Cargo's own record of them, normal dependencies only: build tools and macros don't end up in the app).
+ffmpeg scripts/build-ffmpeg.sh makes, Swift's from the toolchain or scripts/licenses, the Windows installer's CUDA
+runtime's from the CUDA install it comes from), and of every Rust crate the app is built from (Cargo's own record of
+them, normal dependencies only: build tools and macros don't end up in the app).
 
     scripts/notices.py linux|windows <out.txt>
 
@@ -10,6 +11,7 @@ Run it from the packaging scripts, after scripts/fetch-vendor.sh, scripts/build-
 It stops if a license it needs is missing: the packages don't go out without their notices.
 """
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -67,6 +69,23 @@ def miniz_license():
     if (VENDOR / "miniz/LICENSE").is_file():
         return read(VENDOR / "miniz/LICENSE")
     sys.exit("notices: Vendor/miniz/LICENSE is missing (run scripts/fetch-vendor.sh)")
+
+
+def cuda_license():
+    """The CUDA Toolkit's license, from the CUDA whose runtime DLLs the Windows installer carries: package-windows.sh
+    copies them there and says where they came from (CUDA_RUNTIME_DIR). Returns its version and the text."""
+    runtime = os.environ.get("CUDA_RUNTIME_DIR")
+    if not runtime:
+        root = Path(os.environ.get("CUDA_PATH") or r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+        candidates = [root / "bin" / "x64", *sorted(root.glob("*/bin/x64"), reverse=True)]
+        runtime = next((folder for folder in candidates if any(folder.glob("cublas64_*.dll"))), None)
+        if runtime is None:
+            sys.exit(f"notices: no CUDA runtime in {root} (set CUDA_PATH, or run scripts/package-windows.sh)")
+    folder = Path(runtime).parent.parent   # …/CUDA/v13.1, from …/CUDA/v13.1/bin/x64
+    for name in ("LICENSE", "EULA.txt"):
+        if (folder / name).is_file():
+            return folder.name, read(folder / name)
+    sys.exit(f"notices: no CUDA license in {folder} (CUDA_RUNTIME_DIR says where the runtime DLLs came from)")
 
 
 def rust_crates(platform):
@@ -182,6 +201,13 @@ def main():
                 "PDFium's above)", need(pdfium / "licenses/icu.txt")),
     ]
     if windows:
+        version, license = cuda_license()
+        parts += [section(f"NVIDIA CUDA runtime {version} (https://developer.nvidia.com/cuda-toolkit), which llama.cpp's "
+                          "CUDA backend links",
+                          "The installer carries NVIDIA's CUDA runtime and cuBLAS libraries (cudart64_*.dll, cublas64_*.dll, "
+                          "cublasLt64_*.dll) for llama.cpp's CUDA backend. The CUDA Toolkit license below lists them as "
+                          "distributable, in its Attachment A, and carries the notices of what cuBLAS includes.",
+                          license)]
         parts += [section("Microsoft Visual C++ runtime and WebView2",
                           "DigUp's helper ships Microsoft's Visual C++ runtime libraries, which their license allows "
                           "redistributing, and the app's window uses the Microsoft Edge WebView2 runtime that Windows "
