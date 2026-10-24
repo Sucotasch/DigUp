@@ -23,10 +23,10 @@ use std::os::windows::fs::MetadataExt;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    CopyFileExW, CreateFileW, GetFileInformationByHandle, MoveFileExW, SetFileAttributesW, BY_HANDLE_FILE_INFORMATION,
-    COPY_FILE_FAIL_IF_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
-    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_COPY_ALLOWED, OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE,
+    CopyFileExW, CreateFileW, GetFileInformationByHandle, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
+    COPY_FILE_FAIL_IF_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+    FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    MOVEFILE_COPY_ALLOWED, OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Shell::{
@@ -486,9 +486,8 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
     unsafe { CloseHandle(handle) };
-    (ok != 0).then(|| {
-        (((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64, info.dwVolumeSerialNumber as u64)
-    })
+    (ok != 0).then_some((((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+                         info.dwVolumeSerialNumber as u64))
 }
 
 #[cfg(not(windows))]
@@ -595,6 +594,8 @@ fn trash(_: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_READONLY};
 
     fn folder(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("DigUp-file-ops-{name}-{}", std::process::id()));

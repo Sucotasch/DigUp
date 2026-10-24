@@ -41,7 +41,7 @@ impl FolderWatcher {
             let empty = event.paths.is_empty();
             let paths: Vec<PathBuf> = event.paths.into_iter()
                 .filter(|path| !ignored(path) && walked(path, &roots, &skipped)
-                    && types.as_ref().map_or(true, |types| change_may_matter(path, types))).collect();
+                    && types.as_ref().is_none_or(|types| change_may_matter(path, types))).collect();
             if empty || !paths.is_empty() {
                 let _ = sender.send(paths);
             }

@@ -2059,7 +2059,7 @@ fn measure_then_index(app: &AppHandle) {
         });
         let reply = match output {
             Ok(output) => String::from_utf8_lossy(&output.stdout).lines().filter_map(|line| serde_json::from_str(line).ok())
-                .last().unwrap_or_else(|| json!({"event": "speed", "error": format!("exit {}", output.status)})),
+                .next_back().unwrap_or_else(|| json!({"event": "speed", "error": format!("exit {}", output.status)})),
             Err(error) => json!({"event": "speed", "error": error.to_string()}),
         };
         if let Some(mut log) = log {
