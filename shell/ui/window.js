@@ -646,6 +646,40 @@ function confirmDelete() {
   showModal(box);
 }
 
+/// The second, explicit action after the Recycle Bin refused paths that are too long. It shows the scope by folder,
+/// not thousands of names; the report behind it keeps the full list. The first button is Keep, so Enter is the safe way
+/// out and Escape closes the sheet.
+function confirmPermanent(files) {
+  if (!isWindows || !files.length || state.busy || !$modal.hidden) return;
+  const box = element("div", "modal-box");
+  box.append(element("h2", "", `Delete ${countOf(files.length, "file")} permanently?`));
+  const lengths = files.map((item) => item.from.length);
+  const shortest = lengths.reduce((least, length) => Math.min(least, length), Infinity);
+  const longest = lengths.reduce((most, length) => Math.max(most, length), 0);
+  box.append(element("p", "", `${bytes(selectedSize(files))}. Their paths are ${shortest === longest
+    ? `${longest} characters` : `${shortest}–${longest} characters`}; the Recycle Bin limit is 260.`));
+  const groups = new Map();
+  for (const item of files) {
+    const folder = folderOf({ path: item.from });
+    groups.set(folder, (groups.get(folder) || 0) + 1);
+  }
+  const sorted = [...groups].sort((left, right) => right[1] - left[1]);
+  for (const [folder, count] of sorted.slice(0, 5)) {
+    box.append(element("div", "modal-path", `${folder} — ${countOf(count, "file")}`));
+  }
+  if (sorted.length > 5) box.append(element("p", "", `and ${sorted.length - 5} more folders.`));
+  box.append(element("p", "", "Permanent deletion cannot be undone. The full list stays in the report below."));
+  const actions = element("div", "modal-actions");
+  const keep = element("button", "", "Keep Files");
+  keep.onclick = closeModal;
+  const go = element("button", "danger", `Delete ${countOf(files.length, "file")} Permanently`);
+  go.onclick = () => operate("delete_permanent", null,
+    files.map((item) => ({ path: item.from, size: item.size ?? null, modified: item.mtime ?? null })));
+  actions.append(keep, go);
+  box.append(actions);
+  showModal(box);
+}
+
 function countOf(count, one) {
   return `${count.toLocaleString()} ${count === 1 ? one : `${one}s`}`;
 }
@@ -715,7 +749,8 @@ function cancelOperation() {
 }
 
 function verbOf(kind) {
-  return kind === "move" ? "Moving" : kind === "copy" ? "Copying" : "Moving to the Recycle Bin";
+  return kind === "move" ? "Moving" : kind === "copy" ? "Copying"
+    : kind === "delete_permanent" ? "Deleting permanently" : "Moving to the Recycle Bin";
 }
 
 function finishOperation(report) {
@@ -739,9 +774,11 @@ function finishOperation(report) {
 
 /// Moved 10 files · 2 renamed · 1 failed (or Stopped: moved 4 of 12).
 function operationNote(report) {
-  const verb = report.kind === "move" ? "Moved" : report.kind === "copy" ? "Copied" : "Deleted";
+  const verb = report.kind === "move" ? "Moved" : report.kind === "copy" ? "Copied"
+    : report.kind === "delete_permanent" ? "Permanently deleted" : "Moved";
   let text = report.cancelled ? `Stopped: ${verb.toLowerCase()} ${report.done} of ${report.total}`
     : `${verb} ${countOf(report.done, "file")}`;
+  if (report.kind === "delete") text += " to the Recycle Bin";
   if (report.renamed) text += ` · ${report.renamed} renamed`;
   if (report.failed) text += ` · ${report.failed} failed`;
   if (report.skipped) text += ` · ${report.skipped} skipped`;
@@ -782,6 +819,13 @@ function renderReport(report) {
       line.append(element("div", "name", nameOf(item.from)), element("div", "why", item.error || "it wasn't done"));
       return line;
     }));
+  }
+  const permanent = problems.filter((item) => item.reason === "path_too_long");
+  if (permanent.length) {
+    const retry = element("button", "report-more",
+      `Delete ${countOf(permanent.length, "file")} Permanently…`);
+    retry.onclick = () => confirmPermanent(permanent);
+    $report.append(retry);
   }
   $report.hidden = false;
 }

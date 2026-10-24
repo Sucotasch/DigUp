@@ -9,77 +9,61 @@ contradicted existing documentation.
 
 **Method:** read the changed code together with the engine rules it depends on (`Crawler`, `Rules`, `FolderSelection`),
 ran `cargo test`, `cargo clippy --all-targets`, and `node --check` over the shell UI, and compared the behaviour with the
-plan in `docs/file-operations-plan.md`. Swift tests were last run before the final docs/UI-only changes; no Swift source
-changed after that run.
+plan in `docs/file-operations-plan.md`. `swift build --product digup` was run after the final Swift change; the full
+`swift test` suite was not rerun in that session (the last run was before it).
 
 **Verification at the end of this pass:**
 
-- `cargo test --locked` in `shell/src-tauri`: **36 passed**, 0 failed.
+- `cargo test --locked` in `shell/src-tauri`: **38 passed**, 0 failed.
 - `cargo clippy --locked --all-targets`: **no warnings**.
 - `node --check` for `window.js`, `results.js`, `panel.js`, `setup.js`, `settings.js`: **ok**.
-- Manual Recycle Bin restore E2E: **not run** (needs a real Explorer session).
+- `swift build --product digup`: **ok** after the `isCrawled` change.
+- Manual Recycle Bin restore E2E and the permanent-delete confirmation E2E: **not run** (need a real window).
 
 The issues below are ordered by correctness risk, then by cost. Each has a concrete fix; none of them blocks the current
-Windows beta. H1 now fails loudly instead of silently, and H2's common dot-file case is closed; the full destination
-classifier is the main remaining correctness work.
+Windows beta. H1 now offers a guarded permanent action only for paths the Recycle Bin refused, and H2's common dot-file case is
+closed; the full destination classifier is the main remaining correctness work.
 
 ---
 
 ## High
 
-### H1. Long-path move/copy works, long-path delete still goes through the old shell API
+### H1. Long-path move/copy works; long-path delete is a guarded permanent action
 
-**Status: fixed in this pass as a clear refusal.** The preflight now rejects a path at 260 UTF-16 units before calling
-`SHFileOperationW`; full long-path delete is deferred to a proven `IFileOperation` spike.
+**Status: fixed in this pass.** A path at 260 UTF-16 units is refused by the Recycle Bin preflight, and the report offers
+a separate permanent delete only for those files. `DeleteFileW` gets the extended-length form, so the action itself
+works beyond `MAX_PATH`; it is not an automatic fallback.
 
-`wide()` now prefixes absolute and UNC paths with `\\?\` for `MoveFileExW`, `CopyFileExW` and `CreateFileW`
-(`shell/src-tauri/src/file_ops.rs:449`). The Recycle Bin path deliberately does not use that helper:
+`wide()` prefixes absolute and UNC paths with `\\?\` for `MoveFileExW`, `CopyFileExW` and `CreateFileW`
+(`shell/src-tauri/src/file_ops.rs`). The Recycle Bin path deliberately does not use that helper: `SHFileOperationW` is
+the legacy shell API with a documented `MAX_PATH` limitation.
 
-```rust
-fn trash(path: &Path) -> Result<(), String> {
-    let mut from: Vec<u16> = path.to_string_lossy().replace('/', "\\").encode_utf16().collect();
-    from.extend([0, 0]);
-    // SHFileOperationW ...
-}
-```
+**Recommendation: keep `SHFileOperationW`; do not migrate to `IFileOperation` just for long paths.** The evidence that
+`IFileOperation` removes the shell's path limit is not solid: shell items and the Recycle Bin can still hit `MAX_PATH`
+on current Windows. A COM migration would add lifetime, threading and error-model risk for a rare case without a
+proven benefit. The explicit permanent action is smaller, testable and matches what Explorer offers for the same file.
 
-`SHFileOperationW` is the legacy shell API; Microsoft documents a `MAX_PATH` limitation and recommends
-`IFileOperation` since Windows Vista. A file whose move and copy now succeed at 300 characters can therefore still fail
-when it is deleted, with a shell error code instead of a useful message. The per-file report is correct in shape, but the
-error is not actionable.
+**Implemented flow:**
 
-**Recommendation: do the small fix now; do not migrate to `IFileOperation` just for long paths.** The Recycle Bin is
-the safety contract of this feature, and the evidence that `IFileOperation` removes the shell's path limit is not
-solid: shell items and the Recycle Bin can still hit `MAX_PATH` on current Windows. A COM migration would add lifetime,
-threading and error-model risk for a rare case without a proven benefit. Failing loudly is better than a clever
-workaround that may bypass the Recycle Bin or lose the restore location.
+1. `delete` tries the Recycle Bin. A path at 260 UTF-16 units is reported as `reason: "path_too_long"` before the shell
+   call; other errors keep their own messages.
+2. Only those report items get the `Delete N Files Permanently…` action. There is no automatic permanent delete, no
+   `Delete`/`F8` shortcut and no action for permission, busy, cloud or changed-file failures.
+3. The second modal shows the count, size, path-length range, and a folder grouping. It does not build a list of
+   thousands of names; the full list stays in the report, where `Show all` appends in chunks.
+4. Keep Files is the first button (Enter is safe, Escape closes); the danger button names the count and the word
+   Permanently. There is no checkbox: the second modal is the confirmation.
+5. On confirm, `delete_permanent` reuses `check_source` (regular file, not a link, not dataless, size/mtime unchanged),
+   calls `DeleteFileW` with `\\?\`, then updates the index and the watcher echo exactly as a normal delete does.
+6. Cancellation and per-file failures keep working through the existing operation loop.
 
-**Fix (small, recommended now):** keep `SHFileOperationW`, but check the UTF-16 length before calling it and return a
-specific message:
+**Test:** `a_long_path_can_be_deleted_permanently` creates a path over 260 characters, deletes it through `DeleteFileW`
+and checks it is gone. The UI confirmation and the partial batch flow still need a real-window E2E.
 
-```rust
-let units = path.to_string_lossy().encode_utf16().count();
-if units >= 260 {
-    return Err("its path is too long for the Recycle Bin (260 characters)".into());
-}
-```
-
-That is honest but still leaves long paths undeletable.
-
-**Fix (only after a spike proves it works):** move `trash` to `IFileOperation`:
-
-1. `CoInitializeEx` on the worker thread (or `CoInitialize` once per operation).
-2. `SHCreateItemFromParsingName` for the file.
-3. `IFileOperation::SetOperationFlags(FOF_ALLOWUNDO | FOF_WANTNUKEWARNING | FOF_NOERRORUI | FOF_SILENT)`.
-4. `DeleteItem`, `PerformOperations`, and read `GetAnyOperationsAborted`.
-
-`IFileOperation` takes shell items rather than a `MAX_PATH` string and is the API Explorer itself uses. Add a test that
-creates a >260-character path, moves it, copies it and deletes it, then restores it manually once. The current long-path
-test (`a_long_path_moves_and_copies`) covers only the first two steps.
-
-**Why this is not the default:** the COM migration changes the error model for every delete and needs a real Recycle Bin
-restore check on the oldest supported Windows. Spike it behind a test harness, prove that a 300-character path is
-recycled **and restored to its original path**, then decide. Until then the preflight message is the better product.
+**Why not `IFileOperation` yet:** the COM migration changes the error model for every delete and needs a real Recycle
+Bin restore check on the oldest supported Windows. Spike it behind a test harness, prove that a 300-character path is
+recycled **and restored to its original path**, then decide. Until then the guarded permanent action is the better
+product.
 
 ---
 
@@ -91,7 +75,8 @@ folder; the full classifier (Windows hidden attribute, excluded types, datasets)
 `SearchService.isCrawled` checks the destination **folder**, with this comment:
 
 ```swift
-// The folder, not the file: a file named `.photo.jpg` is still one the crawl classifies.
+let name = (path as NSString).lastPathComponent
+guard !name.hasPrefix(".") else { return false }
 let target = FolderSelection.realPath(FolderSelection.parent(path))
 ```
 
@@ -305,7 +290,7 @@ These were found in the same review and are already in `main`, so they are not o
 | A failed partial-copy cleanup was swallowed | the error now names the file that couldn't be removed | this pass |
 | `Copy Paths` failed silently | success and failure both reach the status bar | this pass |
 | `Show all N` built thousands of rows at once | the report appends 500 at a time | this pass |
-| Delete over 260 characters reached the shell and failed obscurely | preflight refuses it with a clear message | this pass |
+| Delete over 260 characters reached the shell and failed obscurely | preflight refuses it; an explicit, guarded permanent delete is offered for those files only | this pass |
 
 The current feature is in a good state: the core paths are tested, the index follows without re-embedding, and the
 Windows-specific behaviour (wide paths, cloud placeholders, echo suppression) has direct tests. The remaining work is

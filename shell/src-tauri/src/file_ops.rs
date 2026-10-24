@@ -23,7 +23,7 @@ use std::os::windows::fs::MetadataExt;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    CopyFileExW, CreateFileW, GetFileInformationByHandle, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
+    CopyFileExW, CreateFileW, DeleteFileW, GetFileInformationByHandle, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
     COPY_FILE_FAIL_IF_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
     FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     MOVEFILE_COPY_ALLOWED, OPEN_EXISTING, PROGRESS_CANCEL, PROGRESS_CONTINUE,
@@ -93,7 +93,7 @@ pub fn cancel(id: u64) {
 pub fn run(app: &AppHandle, shell: &crate::Shell, request: Value) -> Result<Value, String> {
     let request: Request =
         serde_json::from_value(request).map_err(|error| format!("not a file operation: {error}"))?;
-    if !["move", "copy", "delete"].contains(&request.kind.as_str()) {
+    if !["move", "copy", "delete", "delete_permanent"].contains(&request.kind.as_str()) {
         return Err(format!("not something DigUp does with files: {}", request.kind));
     }
     let destination = match request.kind.as_str() {
@@ -146,38 +146,66 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
         'one: {
             if let Err(reason) = check_source(from, item) {
                 report.skipped += 1;
-                report.items.push(json!({"from": item.path, "ok": false, "skipped": true, "error": reason}));
+                report.items.push(json!({"from": item.path, "ok": false, "skipped": true, "error": reason,
+                                         "size": item.size, "mtime": item.mtime}));
                 break 'one;
             }
             match request.kind.as_str() {
-                "delete" => match delete_item(from) {
-                    Ok(()) => {
-                        report.done += 1;
-                        // Note it before the index follows: a batch of thousands takes longer than the watcher's
-                        // quiet period, and its burst must not race the index updates. If the index fails, the
-                        // command's repair sync (and the next start) settles it; the note is only for the echo.
-                        crate::echo::note_file(from);
-                        let mut entry = json!({"from": item.path, "ok": true});
-                        if let Err(error) = index_delete(shell, &item.path) {
-                            report.index = false;
-                            entry["index"] = json!(false);
-                            entry["index_error"] = json!(error);
-                        } else {
-                            index_changed = true;
-                        }
-                        report.items.push(entry);
-                    }
-                    Err(error) => {
+                "delete" | "delete_permanent" => {
+                    let permanent = request.kind == "delete_permanent";
+                    // The command is reachable from the webview: a permanent delete for a normal path would bypass the
+                    // Recycle Bin if the UI were buggy. The Rust side enforces the same rule as the report button.
+                    if permanent && !recycle_too_long(from) {
                         report.failed += 1;
-                        report.items.push(json!({"from": item.path, "ok": false, "error": error}));
+                        report.items.push(json!({"from": item.path, "ok": false,
+                                                 "error": "permanent deletion is only for paths the Recycle Bin can't take",
+                                                 "size": item.size, "mtime": item.mtime}));
+                        break 'one;
                     }
-                },
+                    // The window offers permanent deletion only for this exact refusal. Keep the reason machine-readable:
+                    // the UI must not match on a translated message.
+                    if !permanent && recycle_too_long(from) {
+                        report.failed += 1;
+                        report.items.push(json!({"from": item.path, "ok": false, "reason": "path_too_long",
+                                                 "error": "its path is too long for the Recycle Bin",
+                                                 "size": item.size, "mtime": item.mtime}));
+                        break 'one;
+                    }
+                    let result = if permanent { delete_permanently(from) } else { delete_item(from) };
+                    match result {
+                        Ok(()) => {
+                            report.done += 1;
+                            // Note it before the index follows: a batch of thousands takes longer than the watcher's
+                            // quiet period, and its burst must not race the index updates. If the index fails, the
+                            // command's repair sync (and the next start) settles it; the note is only for the echo.
+                            crate::echo::note_file(from);
+                            let mut entry = json!({"from": item.path, "ok": true});
+                            if permanent {
+                                entry["permanent"] = json!(true);
+                            }
+                            if let Err(error) = index_delete(shell, &item.path) {
+                                report.index = false;
+                                entry["index"] = json!(false);
+                                entry["index_error"] = json!(error);
+                            } else {
+                                index_changed = true;
+                            }
+                            report.items.push(entry);
+                        }
+                        Err(error) => {
+                            report.failed += 1;
+                            report.items.push(json!({"from": item.path, "ok": false, "error": error,
+                                                     "size": item.size, "mtime": item.mtime}));
+                        }
+                    }
+                }
                 "move" | "copy" => {
                     let destination = destination.expect("a destination was checked");
                     if request.kind == "move" && same_folder(from, destination) {
                         report.skipped += 1;
                         report.items.push(json!({"from": item.path, "ok": false, "skipped": true,
-                                                 "error": "it's already in that folder"}));
+                                                 "error": "it's already in that folder",
+                                                 "size": item.size, "mtime": item.mtime}));
                         break 'one;
                     }
                     let result = if request.kind == "move" {
@@ -214,7 +242,8 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
                                 break 'files;
                             }
                             report.failed += 1;
-                            report.items.push(json!({"from": item.path, "ok": false, "error": error}));
+                            report.items.push(json!({"from": item.path, "ok": false, "error": error,
+                                                     "size": item.size, "mtime": item.mtime}));
                         }
                     }
                 }
@@ -316,6 +345,33 @@ fn copy_to_free(app: &AppHandle, id: u64, position: usize, total: usize, from: &
 
 fn delete_item(from: &Path) -> Result<(), String> {
     trash(from)
+}
+
+/// The one reason a delete gets a second, explicit action in the window: the Recycle Bin's API can't take the path.
+#[cfg(windows)]
+fn recycle_too_long(path: &Path) -> bool {
+    path.to_string_lossy().encode_utf16().count() >= 260
+}
+
+#[cfg(not(windows))]
+fn recycle_too_long(_: &Path) -> bool {
+    false
+}
+
+/// The last resort the window offers after the Recycle Bin refused a path: delete the file itself, through the
+/// extended-length form, and report it as permanent. Never called unless the person confirmed that second action.
+#[cfg(windows)]
+fn delete_permanently(path: &Path) -> Result<(), String> {
+    let path = wide(path);
+    if unsafe { DeleteFileW(path.as_ptr()) } == 0 {
+        return Err(why(&std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn delete_permanently(_: &Path) -> Result<(), String> {
+    Err("permanent deletion is Windows only for now".into())
 }
 
 /// Whether the file is already in the folder asked for (either spelling, either case).
@@ -568,7 +624,7 @@ unsafe extern "system" fn copy_progress(total: i64, transferred: i64, _stream: i
 fn trash(path: &Path) -> Result<(), String> {
     // SHFileOperationW is the shell's old path, and the shell refuses a path at MAX_PATH. Say so before spending a
     // shell call on it; moving and copying have their extended-length form, deleting doesn't.
-    if path.to_string_lossy().encode_utf16().count() >= 260 {
+    if recycle_too_long(path) {
         return Err("its path is too long for the Recycle Bin".into());
     }
     let mut from: Vec<u16> = path.to_string_lossy().replace('/', "\\").encode_utf16().collect();
@@ -843,6 +899,20 @@ mod tests {
         assert!(dataless(&metadata));
         let item = Item { path: path.display().to_string(), size: Some(7), mtime: None };
         assert_eq!(check_source(&path, &item).unwrap_err(), "it's only in the cloud, not downloaded");
+        let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_long_path_can_be_deleted_permanently() {
+        let source = folder("permanent-long");
+        let deep = std::path::PathBuf::from("a".repeat(90)).join("b".repeat(90)).join("c".repeat(60));
+        let origin = source.join(&deep);
+        std::fs::create_dir_all(&origin).unwrap();
+        let path = put(&origin, "photo.jpg");
+        assert!(path.to_string_lossy().len() > 260);
+        delete_permanently(&path).unwrap();
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&source);
     }
 

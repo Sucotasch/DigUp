@@ -99,8 +99,10 @@ pause it, or open Settings. Opening it from the Start menu or your app list show
 
 On Windows, the big window can move, copy and delete the pictures, screenshots, video and audio a search shows:
 select them and use the bar under the results or the right-click menu. A name that's taken gets a number
-(`photo (2).jpg`) instead of overwriting a file; Delete goes to the Recycle Bin. Moving or deleting updates the index
-without reading the files again, and a copy that lands in a folder you search is indexed like any new file.
+(`photo (2).jpg`) instead of overwriting a file; Delete goes to the Recycle Bin. If a path is too long for the Recycle
+Bin, DigUp lists the affected folders and offers a separate permanent delete only after you confirm that it cannot be
+undone. Moving or deleting updates the index without reading the files again, and a copy that lands in a folder you
+search is indexed like any new file.
 
 A few things differ by system:
 
@@ -136,7 +138,8 @@ Outside the folders you pick for code search, it never reads code, and inside a 
 folders like `.ssh`, apps or caches. It skips folders that look like datasets, and never downloads files that only
 live in the cloud (iCloud on a Mac, OneDrive on Windows). You can skip more folders or file types in Settings. DigUp
 never uploads your files. On a Mac it only reads them; on Windows it changes, moves or deletes only the results you
-choose in the big window, and Delete goes to the Recycle Bin.
+choose in the big window. Delete goes to the Recycle Bin; a path the Recycle Bin can't take gets a separate permanent
+delete only after an explicit confirmation.
 
 The first pass happens once. On a Mac it takes a few minutes for a few hundred files and can take an hour for a big
 Downloads folder. On Windows and Linux, DigUp runs the model on the graphics card where that's faster and on the
