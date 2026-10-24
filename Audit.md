@@ -178,6 +178,8 @@ destination after a forced failure, but the common path is enough to lock the me
 
 ### M3. `Show all N` builds the whole list in one synchronous pass
 
+**Status: fixed in this pass.** The list now grows in 500-line chunks and keeps the focus on the button between clicks.
+
 `reportList` creates the first eight rows, then on the click does:
 
 ```js
@@ -291,6 +293,7 @@ These were found in the same review and are already in `main`, so they are not o
 | A moved dot-file stayed indexed although the crawl skips hidden names | `isCrawled` rejects dot-prefixed names | this pass |
 | A failed partial-copy cleanup was swallowed | the error now names the file that couldn't be removed | this pass |
 | `Copy Paths` failed silently | success and failure both reach the status bar | this pass |
+| `Show all N` built thousands of rows at once | the report appends 500 at a time | this pass |
 
 The current feature is in a good state: the core paths are tested, the index follows without re-embedding, and the
 Windows-specific behaviour (wide paths, cloud placeholders, echo suppression) has direct tests. The remaining work is

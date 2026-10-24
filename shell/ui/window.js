@@ -791,17 +791,21 @@ function renderReport(report) {
 function reportList(items, line) {
   const list = element("ul", "report-list");
   const fill = (count) => {
-    list.replaceChildren();
-    for (const item of items.slice(0, count)) list.append(line(item));
+    for (const item of items.slice(list.childElementCount, count)) list.append(line(item));
   };
   fill(REPORT_SHOWN);
   if (items.length <= REPORT_SHOWN) return list;
   const wrap = element("div");
   const more = element("button", "report-more", `Show all ${items.length.toLocaleString()}`);
+  let shown = REPORT_SHOWN;
+  const CHUNK = 500;
   more.onclick = () => {
-    fill(items.length);
+    // A batch of thousands is appended a few hundred at a time, so the click doesn't build the whole list in one task.
+    shown = Math.min(items.length, shown + CHUNK);
+    fill(shown);
     $report.classList.add("expanded");
-    more.remove();
+    if (shown === items.length) more.remove();
+    else more.textContent = `Show ${Math.min(CHUNK, items.length - shown).toLocaleString()} more`;
   };
   wrap.append(list, more);
   return wrap;
