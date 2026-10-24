@@ -20,6 +20,14 @@ evals/*.local.json
 
 .DS_Store
 
+# Local agent tools: instructions, notes and launchers, not part of the project
+.agents/
+AGENTS.md
+knowledge.md
+ReviewPrompt.txt
+Errors.txt
+Free-Start.bat
+
 # The Tauri shell (shell/): Cargo builds and the schemas tauri-build writes
 shell/src-tauri/target/
 shell/src-tauri/gen/

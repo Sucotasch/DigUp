@@ -34,6 +34,7 @@ const SEARCH_ICON = '<svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.5"/><
 const $ = (id) => document.getElementById(id);
 const $query = $("query"), $content = $("content"), $side = $("side"), $kinds = $("kinds"), $menu = $("menu");
 const $batch = $("batch"), $batchSummary = $("batch-summary"), $modal = $("modal"), $report = $("report");
+const $announce = $("announce");
 
 const state = {
   query: "",
@@ -63,6 +64,7 @@ const state = {
   indexed: null,        // files indexed of each kind (the home)
 };
 let debugPending = false;
+let resultSeq = 0;   // ids for the results a screen reader follows through the field
 
 // MARK: Searching
 
@@ -205,6 +207,7 @@ function renderContent() {
   else if (!state.ranked.length && !state.weaker.length) $content.append(nothingFound());
   else if (isCode()) $content.append(codeList());
   else $content.append(grid());
+  syncActiveDescendant();
 }
 
 function grid() {
@@ -341,6 +344,8 @@ function weakerToggle() {
 /// Code results, one under another: the file, where in its repo, the lines that matched.
 function codeList() {
   const box = element("div", "code-list");
+  box.setAttribute("role", "listbox");
+  box.setAttribute("aria-label", "Code results");
   for (const hit of state.ranked) box.append(codeRow(hit));
   if (state.weaker.length) {
     box.append(weakerToggle());
@@ -436,9 +441,30 @@ function select(path) {
   state.selection = path;
   state.navigated = true;
   for (const item of $content.querySelectorAll("[data-path]")) item.classList.toggle("selected", item.dataset.path === path);
+  syncActiveDescendant();
   $content.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
   renderSide();
   if (!$big.hidden) renderBig();
+}
+
+/// The result the field's arrows are on, for a screen reader. The field keeps the keyboard (as on the Mac), so it names
+/// the chosen option rather than the option taking focus itself.
+function syncActiveDescendant() {
+  const list = $content.querySelector('[role="listbox"]');
+  if (!list) {
+    $query.removeAttribute("aria-activedescendant");
+    $query.removeAttribute("aria-controls");
+    return;
+  }
+  if (!list.id) list.id = "results";
+  $query.setAttribute("aria-controls", list.id);
+  const option = list.querySelector('[role="option"].selected');
+  if (!option) {
+    $query.removeAttribute("aria-activedescendant");
+    return;
+  }
+  if (!option.id) option.id = `result-${++resultSeq}`;
+  $query.setAttribute("aria-activedescendant", option.id);
 }
 
 /// Arrows move through the grid: ↑ ↓ by a row, ← → by one.
@@ -577,6 +603,7 @@ function countsOf(hits) {
 
 let operationNumber = 0;   // the window's number for its operations, which cancel and the events go by
 let operationView = null;  // the sheet's bar, line and Cancel while an operation runs
+let sheetReturn = null;    // the control a sheet gives the keyboard back to, if it came from one
 let operationSheet = null; // the timer that shows the sheet only if the work takes a moment
 let noteTimer = null;
 
@@ -656,8 +683,8 @@ function confirmPermanent(files) {
   const lengths = files.map((item) => item.from.length);
   const shortest = lengths.reduce((least, length) => Math.min(least, length), Infinity);
   const longest = lengths.reduce((most, length) => Math.max(most, length), 0);
-  box.append(element("p", "", `${bytes(selectedSize(files))}. Their paths are ${shortest === longest
-    ? `${longest} characters` : `${shortest}–${longest} characters`}; the Recycle Bin limit is 260.`));
+  box.append(element("p", "", `${bytes(selectedSize(files))}. ${files.length === 1 ? "Its path is" : "Their paths are"} `
+    + `${shortest === longest ? `${longest} characters` : `${shortest}–${longest} characters`}; the Recycle Bin limit is 260.`));
   const groups = new Map();
   for (const item of files) {
     const folder = folderOf({ path: item.from });
@@ -717,6 +744,11 @@ function operationBox() {
   box.append(element("h2", "", `${verbOf(kind)} ${countOf(total, "file")}…`));
   if (destination) box.append(element("div", "modal-path", destination));
   const bar = element("div", "modal-progress");
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-label", "Progress");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", "100");
+  bar.setAttribute("aria-valuenow", "0");
   const fill = element("span");
   bar.append(fill);
   const line = element("div", "modal-line", `0 of ${total.toLocaleString()}`);
@@ -725,7 +757,7 @@ function operationBox() {
   const actions = element("div", "modal-actions");
   actions.append(cancel);
   box.append(bar, line, actions);
-  operationView = { fill, line, cancel };
+  operationView = { bar, fill, line, cancel };
   return box;
 }
 
@@ -736,9 +768,13 @@ function renderOperation() {
   // A copy reports the file it's in by the byte, so the bar moves through a big one too.
   const partial = bytes != null && size ? Math.min(bytes / size, 1) : 0;
   const fraction = total ? Math.min((shown + partial) / total, 1) : 0;
-  operationView.fill.style.width = `${Math.round(fraction * 100)}%`;
-  operationView.line.textContent = `${shown.toLocaleString()} of ${total.toLocaleString()}`
+  const percent = Math.round(fraction * 100);
+  const text = `${shown.toLocaleString()} of ${total.toLocaleString()}`
     + (path ? ` — ${nameOf(path)}` : "") + (partial > 0 && partial < 1 ? ` (${Math.round(partial * 100)}%)` : "");
+  operationView.fill.style.width = `${percent}%`;
+  operationView.line.textContent = text;
+  operationView.bar.setAttribute("aria-valuenow", String(percent));
+  operationView.bar.setAttribute("aria-valuetext", text);
 }
 
 function cancelOperation() {
@@ -891,6 +927,7 @@ function forget(paths, stay = []) {
 
 /// For a moment after an operation, the status bar's right side says what happened.
 function setNote(text) {
+  announce(text);
   state.note = text;
   clearTimeout(noteTimer);
   noteTimer = setTimeout(() => {
@@ -900,10 +937,23 @@ function setNote(text) {
   renderStatus();
 }
 
+/// Says a line once, for a screen reader: the status bar's note, an error. Empty first, so the same line twice is a
+/// change again.
+function announce(text) {
+  $announce.textContent = "";
+  requestAnimationFrame(() => { $announce.textContent = text; });
+}
+
 // MARK: Sheets
 
 function showModal(box) {
   state.sheet = true;
+  // Where the keyboard goes back to: a button in the report or the bar the sheet was opened from. The field is its home
+  // anyway, and the option it points at keeps its place.
+  if ($modal.hidden) {
+    const at = document.activeElement;
+    sheetReturn = at instanceof HTMLElement && at !== document.body && at !== $query ? at : null;
+  }
   const title = box.querySelector("h2");
   if (title) title.id = "modal-title";
   $modal.replaceChildren(box);
@@ -912,15 +962,21 @@ function showModal(box) {
 }
 
 function hideModal() {
+  const back = sheetReturn;
+  sheetReturn = null;
   $modal.hidden = true;
   $modal.replaceChildren();
   state.sheet = false;
+  // Once the caller has put the report back: its button may have been replaced under the sheet.
+  requestAnimationFrame(() => {
+    if (back?.isConnected) back.focus({ preventScroll: true });
+    else $query.focus();
+  });
 }
 
 function closeModal() {
   if (state.busy) return;   // an operation under way closes its own sheet, with what happened
   hideModal();
-  $query.focus();
 }
 
 /// The grid's columns right now (↑ ↓ move by a row); a list has one.
@@ -938,6 +994,7 @@ function reveal(hit) {
 }
 
 function failed(error) {
+  announce(String(error));
   state.error = String(error);
   renderStatus();
 }
