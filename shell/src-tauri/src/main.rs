@@ -1011,17 +1011,6 @@ fn code_changed(app: &AppHandle, paths: &[PathBuf]) {
     }
 }
 
-/// Code search was turned on or off, or its folders changed: the code index syncs everything.
-fn sync_code(app: &AppHandle) {
-    let shell = app.state::<Arc<Shell>>();
-    if !may_index(&shell) {
-        return;
-    }
-    if let Err(error) = shell.index.sync_code(&shell.index_launch()) {
-        set_status(app, &format!("Indexing couldn't start: {error}"));
-    }
-}
-
 /// Deletes the code index once code search is off (the helpers have let it go: the search service closes it when its
 /// code folders go, an index helper without code folders never opens it). Tried for a while (Windows won't delete a
 /// file still open), then at the next start.

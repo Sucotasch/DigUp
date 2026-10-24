@@ -271,12 +271,6 @@ impl IndexService {
         Ok(())
     }
 
-    /// Code search's folders changed: the running helper syncs the code index (`run` would sync the main one), or one
-    /// starts (it syncs both).
-    pub fn sync_code(&self, launch: &Launch) -> Result<(), String> {
-        self.request(launch, "sync code")
-    }
-
     /// Only what changed under these paths: the helper reconciles their folders instead of walking every chosen one.
     pub fn sync_paths(&self, launch: &Launch, paths: &[PathBuf]) -> Result<(), String> {
         self.sync_paths_as(launch, paths, "sync")

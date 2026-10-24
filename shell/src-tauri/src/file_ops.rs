@@ -422,10 +422,23 @@ fn why(error: &std::io::Error) -> String {
 
 // MARK: Windows
 
-/// A path as the wide calls take it: backslashes, and a NUL at the end.
+/// A path as the wide calls take it: backslashes, the extended-length prefix (the Win32 calls here don't have the
+/// long-path opt-in), and a NUL at the end. `SHFileOperationW` gets its own list and stays unprefixed: the shell doesn't
+/// accept `\\?\` there.
 #[cfg(windows)]
 fn wide(path: &Path) -> Vec<u16> {
-    path.to_string_lossy().replace('/', "\\").encode_utf16().chain([0]).collect()
+    let text = path.to_string_lossy().replace('/', "\\");
+    let text = if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
+        text
+    } else if let Some(rest) = text.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{rest}")   // a share: \\server\share → \\?\UNC\server\share
+    } else if text.len() >= 3 && text.as_bytes()[0].is_ascii_alphabetic() && text.as_bytes()[1] == b':'
+        && text.as_bytes()[2] == b'\\' {
+        format!(r"\\?\{text}")
+    } else {
+        text   // relative or drive-relative: no prefix means anything, and search paths are absolute
+    };
+    text.encode_utf16().chain([0]).collect()
 }
 
 #[cfg(windows)]
@@ -698,6 +711,30 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(answer, 42);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_long_path_moves_and_copies() {
+        let destination = folder("long-dest");
+        let source = folder("long-source");
+        let deep = std::path::PathBuf::from("a".repeat(90)).join("b".repeat(90)).join("c".repeat(60));
+        let (target, origin) = (destination.join(&deep), source.join(&deep));
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&origin).unwrap();
+        let from = put(&origin, "photo.jpg");
+        assert!(from.to_string_lossy().len() > 260);
+        assert!(identity(&from).is_some());
+        let (moved, renamed) = move_to_free(&from, &target).unwrap();
+        assert!(!renamed && moved.is_file() && !from.exists());
+        let copy = free_path(&destination, &moved);
+        let cancel = AtomicBool::new(false);
+        let progress = Progress { app: None, id: 1, position: 0, total: 1, from: &moved, to: &copy, cancel: &cancel,
+                                  last: AtomicU64::new(0) };
+        progress.copy().unwrap();
+        assert!(copy.is_file());
+        let _ = std::fs::remove_dir_all(&destination);
+        let _ = std::fs::remove_dir_all(&source);
     }
 
     #[cfg(windows)]
