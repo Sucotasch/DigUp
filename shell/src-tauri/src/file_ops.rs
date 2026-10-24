@@ -566,6 +566,11 @@ unsafe extern "system" fn copy_progress(total: i64, transferred: i64, _stream: i
 /// To the Recycle Bin, as Explorer's Delete does, through the shell (and its warning when a file is too big for it).
 #[cfg(windows)]
 fn trash(path: &Path) -> Result<(), String> {
+    // SHFileOperationW is the shell's old path, and the shell refuses a path at MAX_PATH. Say so before spending a
+    // shell call on it; moving and copying have their extended-length form, deleting doesn't.
+    if path.to_string_lossy().encode_utf16().count() >= 260 {
+        return Err("its path is too long for the Recycle Bin".into());
+    }
     let mut from: Vec<u16> = path.to_string_lossy().replace('/', "\\").encode_utf16().collect();
     from.extend([0, 0]);   // the shell wants the list ended by two NULs
     let mut operation = SHFILEOPSTRUCTW {
@@ -839,6 +844,13 @@ mod tests {
         let item = Item { path: path.display().to_string(), size: Some(7), mtime: None };
         assert_eq!(check_source(&path, &item).unwrap_err(), "it's only in the cloud, not downloaded");
         let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_path_too_long_for_the_recycle_bin_is_refused() {
+        let long = PathBuf::from("C:/").join("a".repeat(300)).join("photo.jpg");
+        assert_eq!(trash(&long).unwrap_err(), "its path is too long for the Recycle Bin");
     }
 
     #[cfg(windows)]

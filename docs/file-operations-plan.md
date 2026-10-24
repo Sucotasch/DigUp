@@ -843,7 +843,7 @@ symlink; `ReferenceVectorTests` не запускается без модели.
 
 **Проверено (Windows, 2026-10-24):**
 - `cargo clippy --locked --all-targets` — без предупреждений.
-- `cargo test --locked` — 36 тестов, все прошли (включая `change_may_matter`, точные Windows-заметки echo, move/copy пути длиннее 260 символов, пропуск cloud placeholder’а, read-only, занятый файл и Unicode-имена).
+- `cargo test --locked` — 37 тестов, все прошли (включая `change_may_matter`, точные Windows-заметки echo, move/copy пути длиннее 260 символов, пропуск cloud placeholder’а, read-only, занятый файл, Unicode-имена и отказ delete за 260 символами).
 - `swift test` — 124 теста в 17 suites: `IncrementalSyncTests` 8/8 (изоляция выбранных папок, move между scopes, удаление, выбранная папка внутри исключения, project/package-правила, dataset, пустой список путей); `CrawlerTests` проходит. Единственный провал в `DigUpKitTests` — `modelFilesComeFromTheHuggingFaceCacheWhenThere`: создание symlink на Windows без привилегии (Win32 1314), к этой правке отношения не имеет. `LlamaRuntimeTests.vectorsMatchTheReference` не запускается без модели — тоже среда, не регрессия.
 - E2E helper-протокола на `digup.exe index-service`: два root'а, `sync [A/a.txt]` дал `changed=1`, `added=0`, второй root не обойдён; удаление дало `removed=1`; `sync code [code/a.swift]` дал `changed=1`, соседний `README.md` — `unchanged=1`.
 - E2E на `.build/phase4-e2e/root` (76 файлов, 100 векторов):
@@ -859,7 +859,7 @@ symlink; `ReferenceVectorTests` не запускается без модели.
 
 ### Phase 5 — Полировка
 
-- Длинные пути (`\\?\`) закрыты: `wide()` префиксует абсолютные пути и UNC, а `SHFileOperationW` получает путь без префикса; тест гоняет move/copy за 260 символами.
+- Длинные пути (`\\?\`) закрыты для move/copy/identity: `wide()` префиксует абсолютные пути и UNC. `SHFileOperationW` extended path не принимает, поэтому delete за 260 символов теперь отклоняется preflight'ом с понятной ошибкой, а не уходит в shell. Тесты гоняют move/copy за 260 символами и проверяют отказ delete.
 - Облачные placeholder’ы закрыты: preflight читает атрибуты и пропускает файл с `FILE_ATTRIBUTE_OFFLINE`/`RECALL_ON_OPEN`/`RECALL_ON_DATA_ACCESS` как «only in the cloud, not downloaded», не гидратируя его.
 - Read-only и занятые файлы проверены: read-only move/copy проходят (Windows не считает атрибут запретом на rename), занятый файл даёт `Windows says it's in use, or not allowed`, остаётся на месте и может быть обработан после закрытия.
 - Отмена и частичные ошибки уже в отчёте (`cancelled`, `failed`, `skipped`, отчёт по каждому файлу); отдельных правок не требуют.
