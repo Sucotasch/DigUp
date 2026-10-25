@@ -41,7 +41,8 @@ const SEARCH_ICON = '<svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.5"/><
 
 const $ = (id) => document.getElementById(id);
 const $query = $("query"), $content = $("content"), $side = $("side"), $kinds = $("kinds"), $menu = $("menu");
-const $batch = $("batch"), $batchSummary = $("batch-summary"), $modal = $("modal"), $report = $("report");
+const $batch = $("batch"), $batchSummary = $("batch-summary"), $batchToggle = $("batch-toggle");
+const $modal = $("modal"), $report = $("report");
 const $announce = $("announce");
 
 const state = {
@@ -765,8 +766,10 @@ function renderBatch() {
   $batchSummary.textContent = chosen.length
     ? `${chosen.length.toLocaleString()} selected · ${bytes(selectedSize(chosen))}`
     : "Select files to copy, move, or delete · F5 copy · F6 move · F8 delete";
-  $("batch-all").disabled = chosen.length === items.length;
-  $("batch-none").disabled = !chosen.length;
+  const any = chosen.length > 0;
+  $batchToggle.textContent = any ? "Deselect All" : "Select All";
+  $batchToggle.title = any ? "Deselect All (Ctrl+Shift+A)" : "Select All (Ctrl+A)";
+  $batchToggle.setAttribute("aria-keyshortcuts", any ? "Control+Shift+A" : "Control+A");
   for (const id of ["batch-paths", "batch-copy", "batch-move", "batch-delete"]) $(id).disabled = !chosen.length;
 }
 
@@ -1796,8 +1799,10 @@ $("update").onclick = () => invoke("offer_update").catch(failed);
 $kinds.onmousedown = (event) => event.preventDefault();
 // The chosen files' bar: its buttons take the clicks but not the keyboard (typing stays in the field).
 $batch.onmousedown = (event) => { if (event.target.closest("button")) event.preventDefault(); };
-$("batch-all").onclick = selectAll;
-$("batch-none").onclick = () => clearSelection();
+$batchToggle.onclick = () => {
+  if (selectedHits().length) clearSelection();
+  else selectAll();
+};
 $("batch-paths").onclick = copyPaths;
 $("batch-copy").onclick = () => moveOrCopy("copy");
 $("batch-move").onclick = () => moveOrCopy("move");
