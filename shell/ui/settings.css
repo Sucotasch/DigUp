@@ -77,3 +77,16 @@ select.field {
 .path-button:hover { color: var(--text); text-decoration: underline; }
 .privacy-text { font-size: 12px; color: var(--secondary); line-height: 1.5; margin: 0; }
 .problem { color: #c4441c; }
+
+.model-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 6px; }
+.model-actions button { font-size: 12px; }
+.model-actions .danger-link { color: #c4441c; }
+#model-note { margin: 6px 0 0; }
+#model-note.problem { color: #c4441c; }
+.cleanup { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 0;
+  font-size: 12px; color: var(--secondary); }
+.cleanup .link { padding: 0; font-size: 12px; }
+#model-confirm { margin-top: 10px; }
+#model-confirm-text { white-space: pre-line; }
+#model-links { margin-top: 10px; font-size: 12px; }
+#model-transfer-row span:last-child { max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1,7 +1,7 @@
 # DigUp: файловые операции из результатов поиска
 
 **Статус:** Phase 0 (сборка, baseline, smoke-test, shell, установщик), Phase 1 (индексные операции), Phase 2 (Rust: файловые операции), Phase 3 (UI), Phase 4 (path-aware sync, watcher-фильтр, отчёт) и edge cases Phase 5 (длинные пути, cloud placeholders, read-only, занятые файлы, явный permanent delete для path_too_long) закрыты. Подсказки, документация и код доступности (activedescendant, progressbar, возврат фокуса после диалога) тоже; остались проход со скринридером и ручной E2E.
-**Обновлено:** 2026-10-24.  
+**Обновлено:** 2026-10-25 (пометка про пул процессов после замеров скорости).
 **Платформа первого этапа:** Windows 10/11.  
 **Область:** Move, Copy, Delete для медиа-файлов из результатов поиска в большом окне DigUp.
 
@@ -68,7 +68,7 @@
 **Окружение этой машины**
 
 - Windows 10, Git Bash; пути в командах — через `/`, не `\`.
-- **Git Bash этого стенда (`d:/Works/Win-Bash`) нельзя использовать для запуска `digup`:** он портит PATH дочерним процессам (`C:\…` теряет `C:`), из-за чего `ggml-cuda.dll` молча не грузится. Симптом — `backends: CPU` в `worker.log` и индекс в ~25 раз медленнее, без ошибки. Он же не умеет создавать non-ASCII имена (вместо `é`/`日` получается mojibake). Запускать только из `.bat` через `cmd.exe`, где `PATH` и `DIGUP_BACKENDS` выставлены явно; тест-файлы с Unicode создавать из Python.
+- **Git Bash этого стенда (`d:/Works/Win-Bash`) нельзя использовать для запуска `digup` без явного PATH:** он портит PATH дочерним процессам (`C:\…` теряет `C:`), из-за чего `ggml-cuda.dll` молча не грузится. Симптом — `backends: CPU` в `worker.log` и индекс в ~25 раз медленнее, без ошибки. Скрипты замеров (`.build/run_index_service.py`, `.build/bench_worker.py`) выставляют CUDA `bin/x64` в PATH сами и получают CUDA; после запуска всё равно проверять `backends: CUDA, CPU`. Он же не умеет создавать non-ASCII имена (вместо `é`/`日` получается mojibake). Для ручных прогонов — `.bat` через `cmd.exe`, где `PATH` и `DIGUP_BACKENDS` выставлены явно; тест-файлы с Unicode создавать из Python.
 - Swift **6.4.0 установлен** в `C:\Users\sucot\AppData\Local\Programs\Swift` (toolchain `6.4.0+Asserts`); `swiftc` hello-world собран и запущен. PATH и `SDKROOT` прописаны в `HKCU\Environment`; в новых терминалах подхватываются. Сборка — в MSVC dev-shell: прямой `swift build` из Git Bash без `vcvars64` падает на `could not find CLI tool link`.
 - GPU: **RTX 4070 Ti Super 16 GB**, `nvcc` 13.1 есть в PATH. Форк — **CUDA-only**: `scripts/build-llama.sh` собрал `llama.cpp b11461` с `FLAVOR=cuda` (см. `Vendor/llama/BUILD`), CPU-бэкенды остались только аварийным fallback (`GGML_CPU_ALL_VARIANTS=ON`). CUDA-сборка проверена: `digup speed --model` показал `backends: CUDA, CPU`, `device: gpu`, agreement `0.999755`, и каждый `index` пишет то же в `worker.log`. Vulkan не используем и не ставим; upstream CI (`packages.yml`) собирает Vulkan, но для форка это не target.
 - **CUDA runtime:** `ggml-cuda.dll` зависит от `cublas64_13.dll` (а тот — от `cudart64_13.dll`). Они лежат не в `Vendor/llama/lib`, а в `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64`. Локально работают два варианта: `DIGUP_BACKENDS=Vendor/llama/lib` и CUDA `bin/x64` в PATH, или (как в установщике) все DLL рядом с `digup.exe` — тогда хватает одного `PATH` к CUDA. Без CUDA DLL backend молча падает в CPU. Для установщика эти DLL нужно явно положить в `helper/` — `package-windows.sh` их сейчас не копирует.
@@ -82,7 +82,10 @@
   `…/Swift/Platforms/6.4.0/Windows.platform/Developer/Library/{XCTest,Testing}-6.4.0/usr/bin64`, `Foundation.dll` и
   остальное из `…/Swift/Runtimes/6.4.0/usr/bin`, `Vendor/pdfium/bin` и `Vendor/llama/lib`; debug-сборке — ещё
   `…/VC/Redist/MSVC/<ver>/debug_nonredist/x64/Microsoft.VC143.DebugCRT`. Ещё `Vendor/ffmpeg/bin` — иначе ImageTests
-  не поворачивают TIFF/WebP/HEIC. С ними 124 теста запускаются.
+  не поворачивают TIFF/WebP/HEIC. `ReferenceVectorTests` дополнительно нужен `DIGUP_BACKENDS=Vendor/llama/lib`:
+  без него тест пишет `can't load …gguf`, хотя файл на месте (проверено 2026-10-25: с ним 7/7 проходят). С ними
+  124 теста запускаются; 123 проходят, `modelFilesComeFromTheHuggingFaceCacheWhenThere` падает на symlink без
+  прав (Win32 1314) — это среда, не регрессия.
 - `gh` настроен; upstream — `ARahim3/DigUp`.
 - Windows-сборка в CI (`packages.yml`) использует **Swift 6.4.0**, MSVC dev-cmd, Vulkan SDK и MSYS2/MinGW для ffmpeg; `Package.swift` объявляет tools 6.2. Для форка берём Swift 6.4.0 и MSVC, а Vulkan из upstream-пайплайна не тащим. Локально стоит 6.4.0, как CI.
 - `ci.yml` гоняет Swift на macOS/Linux и `cargo test` shell на Linux; **Windows Swift-тесты автоматически не гоняются** — Windows E2E ручной.
@@ -168,6 +171,13 @@ Smoke (`.build/testbed` целиком): 80 файлов и 104 вектора �
   а не с полным проходом;
 - полный повторный sync после ошибки `file_op` стоит ~7 s на 76 файлов — допустимый fallback;
 - 3 GiB файл в индексируемой папке не ломает crawl, значит E2E с большими медиа можно не бояться.
+
+**После 2026-10-25 (пул процессов):** эти цифры сняты одиночным `digup index` (модель в том же процессе). Приложение
+(Tauri-шелл, Windows/Linux) индексирует через `index-service`, которому передаётся `DIGUP_INDEX_WORKERS=auto` —
+1–4 процесса по свободной VRAM. На полном наборе 4306 изображений это 197.35 → 126.88 с (1.56×), векторы бит-в-бит; на 76 файлах первый
+проход через приложение может быть быстрее 7 с. Для проверок file-op важна не абсолютная цифра, а отсутствие
+лишней работы индексатора; сравнивать с неизменным sync (0.15 s) по-прежнему можно. Подробности —
+`docs/image-embedding-performance.md`.
 
 ---
 
@@ -946,7 +956,8 @@ symlink; `ReferenceVectorTests` не запускается без модели.
 - Время Move/Delete — порядка файловой операции, не обхода папок.
 - База для сравнения (2.3): 76 файлов — 0,15 s неизменный sync и 7 s полный проход на CUDA; move/delete 10 файлов
   должны быть < 1 s и без строк индексатора. На CPU те же 76 файлов — 178 s, то есть CPU-замеры без проверки
-  `backends` непригодны.
+  `backends` непригодны. С пулом (`auto`) абсолютный проход через приложение может быть меньше; для file-op
+  важны отсутствие `scanning`/`sync` от операции и неизменный sync, а не абсолютное время.
 
 ---
 
@@ -961,7 +972,7 @@ symlink; `ReferenceVectorTests` не запускается без модели.
 | CUDA backend молча падает в CPU | `ggml-cuda.dll` требует `cublas64_13.dll`/`cudart64_13.dll` из `CUDA/v13.1/bin/x64`; без них `backends: CPU` без ошибки. Подтверждено на этом стенде: запуск из местного Git Bash без `cmd.exe` тоже даёт `backends: CPU` (портится PATH), индекс в 25× медленнее. В установщик класть эти DLL; перед baseline и E2E проверять `backends: CUDA, CPU` в `worker.log` |
 | `.build/release` не создался | SwiftPM 6.4 кладёт exe в `.build/out/Products/Release-windows-x86_64`; `package-windows.sh` теперь берёт путь из `swift build -c release --show-bin-path` — проверено сборкой установщика |
 | `swift build` удаляет tracked `Package.resolved` | наблюдалось дважды: после сборки файл в статусе ` D` (вероятно, потому что на Windows у пакета нет зависимостей — Sparkle только для macOS); после каждой сборки `git checkout -- Package.resolved`, не коммитить его удаление |
-| Замеры из Git Bash дают CPU вместо CUDA | PATH дочернего процесса портится; запускать только через `.bat`/`cmd.exe` и проверять `backends: CUDA, CPU` в `worker.log` перед каждым замером |
+| Замеры из Git Bash дают CPU вместо CUDA | PATH дочернего процесса портится; запускать через `.bat`/`cmd.exe` или скриптом, который сам кладёт CUDA `bin/x64` в PATH; перед каждым замером проверять `backends: CUDA, CPU` в `worker.log` |
 | ffmpeg из пути с пробелами | `dav1d.pc` экранирует пробел, configure не находит заголовок; собирать через junction без пробелов (`D:\DigUpBuild`) |
 | Git's `link.exe` перехватывает MSVC-линкер | в Git Bash `/usr/bin` идёт раньше MSVC; перед `package-windows.sh` положить `VCToolsInstallDir/bin/Hostx64/x64` в начало PATH |
 | CUDA runtime в установщике без notices | закрыто: `notices.py windows` читает EULA и notices cuBLAS из CUDA, чьи DLL положил `package-windows.sh` (`CUDA_RUNTIME_DIR`) |

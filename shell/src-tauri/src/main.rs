@@ -13,6 +13,7 @@ mod file_ops;
 mod helper;
 mod hotkey;
 mod hours;
+mod models;
 mod moments;
 mod options;
 mod settings;
@@ -64,6 +65,12 @@ struct Shell {
     search: SearchService,
     index: IndexService,
     model: ModelDownload,
+    /// A download, copy or check into another folder (Settings → Storage), apart from the active model.
+    transfer: models::Transfer,
+    /// What that transfer is doing now, for Settings: {"state": "idle|working|verifying|done|failed", …}.
+    transfer_state: Mutex<Value>,
+    /// One model-folder operation at a time (change, import, delete, check).
+    models_busy: AtomicBool,
     /// The model for the setup window and the tray: {"state": "checking|downloading|waiting|ready|failed", …}.
     model_state: Mutex<Value>,
     /// What indexing is doing, from the index helper's events (status.rs).
@@ -110,6 +117,23 @@ struct Shell {
 }
 
 impl Shell {
+    /// One model-folder operation at a time. `allow_measuring`: a check reads the files and can run while this computer
+    /// is being timed; a change or delete stops the helpers, so it waits for the speed check to end.
+    fn begin_models(&self, allow_measuring: bool) -> Result<(), String> {
+        if self.models_busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err("Another model operation is running.".into());
+        }
+        if !allow_measuring && self.measuring.load(Ordering::SeqCst) {
+            self.models_busy.store(false, Ordering::SeqCst);
+            return Err("The speed check is running; try again in a few seconds.".into());
+        }
+        Ok(())
+    }
+
+    fn end_models(&self) {
+        self.models_busy.store(false, Ordering::SeqCst);
+    }
+
     /// The folders searched: the launch arguments' in dev runs, else the settings'.
     fn folders(&self) -> Vec<String> {
         if !self.options.roots.is_empty() {
@@ -154,24 +178,53 @@ impl Shell {
         shortcut_text(&self.hotkey())
     }
 
+    /// The folder with the model files: `--models` in dev runs, else the person's choice, else where an older DigUp
+    /// kept them, else a folder of DigUp's own (models.rs).
+    fn models_folder(&self) -> PathBuf {
+        models::resolve_models_folder(&self.options, &self.settings.lock().unwrap())
+    }
+
     /// A background helper (indexing, the download), below the person's own programs for the processor.
     /// `download-model`: fetches what's missing of the model, verifies what's there, says done.
     fn download_launch(&self) -> Launch {
-        let mut download = vec!["download-model".to_string()];
-        if let Some(models) = &self.options.models {
-            download.extend(["--to".to_string(), models.display().to_string()]);
+        self.download_launch_to(&self.models_folder(), false, "model.log")
+    }
+
+    fn download_launch_to(&self, folder: &Path, check: bool, log: &str) -> Launch {
+        let mut download = vec!["download-model".to_string(), "--to".to_string(), folder.display().to_string()];
+        if check {
+            download.push("--check".to_string());
         }
-        self.launch(download, "model.log")
+        self.launch(download, log)
+    }
+
+    fn model_verify_launch(&self, folder: &Path) -> Launch {
+        self.launch(vec!["model-verify".to_string(), "--to".to_string(), folder.display().to_string()], "model.log")
+    }
+
+    fn model_import_launch(&self, folder: &Path, files: &[String]) -> Launch {
+        let mut args = vec!["model-import".to_string(), "--to".to_string(), folder.display().to_string()];
+        args.extend(files.iter().cloned());
+        self.launch(args, "model-transfer.log")
     }
 
     /// What every helper gets: where the model is, and `DIGUP_DEVICE=cpu` when the person chose the processor.
     fn helper_env(&self) -> Vec<(String, String)> {
-        let mut env: Vec<(String, String)> =
-            self.options.models.iter().map(|models| ("DIGUP_MODELS".to_string(), models.display().to_string())).collect();
-        if self.settings.lock().unwrap().processor_only {
-            env.push(("DIGUP_DEVICE".to_string(), "cpu".to_string()));
-        }
-        env
+        let folder = self.models_folder();
+        helper_env_for(&self.settings.lock().unwrap(), &folder)
+    }
+
+    /// The search service with the folders and environment as they are now (after a model folder change or the
+    /// processor choice: `SearchService::set_launch` makes the next process use it).
+    fn search_launch(&self) -> Launch {
+        let settings = self.settings.lock().unwrap().clone();
+        let mut args = vec!["search-service".to_string()];
+        args.extend(self.index_arguments());
+        args.extend(folder_arguments(&settings, &self.code_folders()));
+        args.extend(self.folders());
+        let mut launch = self.launch(args, "search.log");
+        launch.background = false;   // it answers typing
+        launch
     }
 
     fn launch(&self, args: Vec<String>, log: &str) -> Launch {
@@ -198,7 +251,14 @@ impl Shell {
         args.extend(self.index_arguments());
         args.extend(folder_arguments(&settings, &self.code_folders()));
         args.extend(self.folders());
-        self.launch(args, "index.log")
+        let mut launch = self.launch(args, "index.log");
+        // One llama.cpp context leaves a fast graphics card mostly idle while indexing: the helper starts as many as
+        // the card's free memory allows (1–4; docs/image-embedding-performance.md). Only indexing gets this; a
+        // DIGUP_INDEX_WORKERS set by hand still wins.
+        if std::env::var_os("DIGUP_INDEX_WORKERS").is_none() {
+            launch.env.push(("DIGUP_INDEX_WORKERS".into(), "auto".into()));
+        }
+        launch
     }
 
     /// Where the code index is (deleted when code search is turned off).
@@ -235,6 +295,16 @@ impl Shell {
         snapshot["update"] = self.updates.snapshot();
         snapshot
     }
+}
+
+/// The model folder, and the processor when the person chose it: every helper gets this (the indexer's workers inherit
+/// it), so nothing looks in a second place for half a model.
+fn helper_env_for(settings: &Settings, models: &Path) -> Vec<(String, String)> {
+    let mut env = vec![("DIGUP_MODELS".to_string(), models.display().to_string())];
+    if settings.processor_only {
+        env.push(("DIGUP_DEVICE".to_string(), "cpu".to_string()));
+    }
+    env
 }
 
 /// What both helpers are told besides the folders: what's skipped in them, and code search's folders.
@@ -399,6 +469,8 @@ fn setup_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
         "hotkey": shell.hotkey_text(),
         "shortcut": {"method": shell.shortcut.name(), "command": hotkey::toggle_command()},
         "model": shell.model_state.lock().unwrap().clone(),
+        // The setup model step shows where the model is (or would go) before anything is downloaded.
+        "storage": storage(&shell),
         "state": shell.snapshot(),
         "auto": shell.options.debug_setup,
     })
@@ -735,7 +807,10 @@ fn main() {
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses,
-            file_operation, cancel_file_operation, pick_destination_folder
+            file_operation, cancel_file_operation, pick_destination_folder,
+            pick_model_folder, pick_model_files, model_folder_plan, model_folder_apply, download_model,
+            model_check, model_import, delete_model_files, delete_old_model_files, model_manifest,
+            setup_model_download, setup_model_use, setup_model_skip
         ])
         .build(tauri::generate_context!())
         .expect("DigUp couldn't start");
@@ -765,6 +840,8 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         None => app.path().app_config_dir()?.join("settings.json"),
     };
     let settings = Settings::load(&settings_path);
+    let model_folder = models::resolve_models_folder(&options, &settings);
+    let helper_env = helper_env_for(&settings, &model_folder);
     let roots: Vec<String> = if options.roots.is_empty() {
         settings.folders.clone()
     } else {
@@ -783,7 +860,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         Launch {
             program: options.helper.clone(),
             args: search_args,
-            env: options.models.iter().map(|models| ("DIGUP_MODELS".to_string(), models.display().to_string())).collect(),
+            env: helper_env,
             log: Some(logs.join("search.log")),
             background: false,   // it answers typing
         },
@@ -817,6 +894,9 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         search,
         index,
         model,
+        transfer: models::Transfer::default(),
+        transfer_state: Mutex::new(json!({"state": "idle"})),
+        models_busy: AtomicBool::new(false),
         model_state: Mutex::new(json!({"state": "checking"})),
         watcher: Mutex::new(None),
         code_watcher: Mutex::new(None),
@@ -874,8 +954,8 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         _ => {}
     }
 
-    // The search service starts now (the first search is then quick); the model is checked (and fetched if it's
-    // missing: on first launch that runs while setup is open, as on the Mac); indexing waits for both.
+    // The search service starts now (the first search is then quick). The model is checked as well, but a first launch
+    // waits for setup's model step before fetching anything; indexing waits for both.
     let warm = shell.clone();
     let counted = handle.clone();
     tauri::async_runtime::spawn(async move {
@@ -894,8 +974,10 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
             changed(&counted);
         }
     });
-    if let Err(error) = shell.model.run(&shell.download_launch()) {
-        model_event(&handle, json!({"event": "error", "message": error}));
+    // A first launch chooses the model (or skips it) in setup before anything is downloaded; an install that already
+    // has both files goes on as before, with no download. Later starts always go through `start_model`.
+    if shell.is_set_up() || models::complete(&shell.models_folder()) {
+        start_model(&handle, &shell);
     }
     if !shell.folders().is_empty() || !shell.code_folders().is_empty() {
         watch_folders(&handle);
@@ -1056,6 +1138,16 @@ fn delete_code_index(shell: &Arc<Shell>) {
 
 fn stop_helpers(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>();
+    shell.transfer.stop();
+    shell.model.stop();
+    shell.index.stop();
+    shell.search.stop();
+}
+
+/// Stops everything that may hold a model file open: a folder change or a delete needs the files to itself.
+fn stop_model_helpers(app: &AppHandle) {
+    let shell = app.state::<Arc<Shell>>();
+    shell.transfer.stop();
     shell.model.stop();
     shell.index.stop();
     shell.search.stop();
@@ -1334,6 +1426,7 @@ fn settings_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
         "skipTypes": settings.skip_types,
         "indexHours": {"on": settings.index_hours_on, "start": settings.index_hours.start, "end": settings.index_hours.end},
         "storage": storage(&shell),
+        "transfer": shell.transfer_state.lock().unwrap().clone(),
         "code": {
             "folders": shell.code_folders(),
             "skipped": settings.code_skipped,
@@ -1353,28 +1446,526 @@ fn settings_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
     })
 }
 
-/// Where the model and the index are, and how big the index is on disk (its database and write-ahead log).
+/// Where the model and the index are, how big the index is on disk (its database and write-ahead log), and the model
+/// files as they are now.
 fn storage(shell: &Shell) -> Value {
     let index = shell.options.index_folder();
     let size = |name: &str| -> u64 {
         let Some(index) = &index else { return 0 };
         ["", "-wal", "-shm"].iter().filter_map(|end| std::fs::metadata(index.join(format!("{name}{end}"))).ok()).map(|file| file.len()).sum()
     };
-    let models = shell.options.models.clone().or_else(|| {
-        if cfg!(windows) {
-            std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("DigUp").join("Models"))
-        } else {
-            let data = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
-            data.map(|data| data.join("digup").join("Models"))
+    let mut storage = models::info(shell);
+    storage["index"] = json!(index.as_ref().map(|folder| folder.display().to_string()));
+    storage["indexBytes"] = json!(size("index.sqlite"));
+    storage["codeBytes"] = json!(size("code.sqlite"));
+    storage
+}
+
+// MARK: The model folder
+
+/// A transfer's JSON lines as Settings sees them, apart from the active model's own state: progress doesn't replace
+/// "Downloaded", and a failed copy doesn't make the working model look broken.
+fn transfer_event(app: &AppHandle, event: &Value) {
+    let shell = app.state::<Arc<Shell>>().inner().clone();
+    let state = match event["event"].as_str().unwrap_or_default() {
+        "file" if event["present"].is_boolean() => json!({"state": "verifying", "name": event["name"],
+                                                          "ok": event["ok"], "problem": event["problem"]}),
+        "file" => json!({"state": "working", "name": event["name"], "from": event["from"]}),
+        "progress" => json!({"state": "working", "name": event["name"], "bytes": event["bytes"],
+                             "total": event["total"], "allBytes": event["all_bytes"], "allTotal": event["all_total"]}),
+        "verifying" => json!({"state": "verifying", "name": event["name"]}),
+        "waiting" => json!({"state": "waiting"}),
+        "retry" => json!({"state": "working", "problem": event["message"]}),
+        // The helper is through with its part; the operation then verifies and switches, and only its end is `done`
+        // (a helper's done would let Settings re-enable the buttons while the model is still being put in place).
+        "done" => json!({"state": "verifying", "folder": event["folder"], "ok": event["ok"]}),
+        "error" => json!({"state": "failed", "message": event["message"]}),
+        _ => return,
+    };
+    *shell.transfer_state.lock().unwrap() = state.clone();
+    let _ = app.emit("model-transfer", state);
+}
+
+fn set_transfer_state(app: &AppHandle, shell: &Arc<Shell>, state: Value) {
+    *shell.transfer_state.lock().unwrap() = state.clone();
+    let _ = app.emit("model-transfer", state);
+}
+
+/// `model-verify` for a folder: whether every file is right, and what it said about each.
+fn verify_folder(app: Option<&AppHandle>, shell: &Arc<Shell>, folder: &Path, announce: bool)
+    -> Result<(bool, Vec<Value>), String> {
+    let mut files = Vec::new();
+    let app = app.cloned();
+    let last = shell.transfer.run(shell.model_verify_launch(folder), |event| {
+        if event["event"] == "file" {
+            files.push(event.clone());
         }
+        if announce {
+            if let Some(app) = &app {
+                transfer_event(app, &event);
+            }
+        }
+    })?;
+    Ok((last["ok"] == true, files))
+}
+
+/// Why verification failed, naming the file: for a message a person can act on.
+fn verify_problem(folder: &Path, files: &[Value]) -> String {
+    for file in files {
+        if file["ok"] != true {
+            let name = file["name"].as_str().unwrap_or("a model file");
+            let problem = file["problem"].as_str().unwrap_or("not usable");
+            return format!("{}: {problem}", folder.join(name).display());
+        }
+    }
+    format!("The model files in {} aren't usable.", folder.display())
+}
+
+/// Makes `target` the model folder: helpers stopped, the choice saved, the search service relaunched with the new
+/// environment, and indexing (after the speed check) on the verified files. `cleanup`: the folder a move came from,
+/// deleted once the new files are ready.
+fn activate_model(app: &AppHandle, shell: &Arc<Shell>, target: &Path, cleanup: Option<String>)
+    -> Result<(), String> {
+    if !models::complete(target) {
+        return Err(format!("The model files in {} aren't all there.", target.display()));
+    }
+    stop_model_helpers(app);
+    let volume = models::volume_id(target);
+    {
+        let mut settings = shell.settings.lock().unwrap();
+        settings.models_folder = Some(target.display().to_string());
+        settings.models_volume = volume;
+        settings.model_removed = false;
+        if let Some(cleanup) = cleanup {
+            settings.model_cleanup = (!models::same_path(Path::new(&cleanup), target)).then_some(cleanup);
+        }
+        settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+    }
+    shell.search.set_launch(shell.search_launch());
+    set_model_state(app, shell, json!({"state": "checking", "folder": target.display().to_string()}));
+    set_model_state(app, shell, json!({"state": "ready", "folder": target.display().to_string()}));
+    let _ = app.emit("model-files", json!({"folder": target.display().to_string()}));
+    cleanup_old(app);
+    measure_then_index(app);
+    Ok(())
+}
+
+/// The work behind `model_folder_apply`, on its own thread: copy or download while the old model keeps working, verify,
+/// then switch.
+fn apply_model_folder(app: &AppHandle, shell: &Arc<Shell>, target: &Path, action: &str) -> Result<(), String> {
+    let current = shell.models_folder();
+    if models::same_path(target, &current) {
+        let (ok, files) = verify_folder(Some(app), shell, target, true)?;
+        if !ok {
+            return Err(verify_problem(target, &files));
+        }
+        clear_model_removed(shell);
+        remember_models_volume(shell);
+        set_model_state(app, shell, json!({"state": "ready", "folder": target.display().to_string()}));
+        return Ok(());
+    }
+    match action {
+        "use" => {
+            let (ok, files) = verify_folder(Some(app), shell, target, true)?;
+            if !ok {
+                return Err(verify_problem(target, &files));
+            }
+            activate_model(app, shell, target, None)
+        }
+        "download" => {
+            std::fs::create_dir_all(target)
+                .map_err(|error| format!("Can't make {}: {error}", target.display()))?;
+            shell.transfer.run(shell.download_launch_to(target, false, "model-transfer.log"), |event| {
+                transfer_event(app, &event);
+            })?;
+            let (ok, files) = verify_folder(Some(app), shell, target, true)?;
+            if !ok {
+                return Err(verify_problem(target, &files));
+            }
+            activate_model(app, shell, target, None)
+        }
+        "move" => {
+            if !models::complete(&current) {
+                return Err("The model files now aren't all there, so they can't be moved.".into());
+            }
+            std::fs::create_dir_all(target)
+                .map_err(|error| format!("Can't make {}: {error}", target.display()))?;
+            let files: Vec<String> = models::MODEL_FILES.iter()
+                .map(|name| current.join(name).display().to_string()).collect();
+            shell.transfer.run(shell.model_import_launch(target, &files), |event| {
+                transfer_event(app, &event);
+            })?;
+            let (ok, files) = verify_folder(Some(app), shell, target, true)?;
+            if !ok {
+                return Err(verify_problem(target, &files));
+            }
+            activate_model(app, shell, target, Some(current.display().to_string()))
+        }
+        _ => Err(format!("not a model folder action: {action}")),
+    }
+}
+
+/// Picks the folder the model should live in (none when the picker is cancelled).
+#[tauri::command]
+async fn pick_model_folder(app: AppHandle) -> Option<String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("Choose the Model Folder").pick_folder(move |folder| {
+        let _ = sender.send(folder);
     });
+    receiver.await.ok().flatten().and_then(|folder| folder.into_path().ok())
+        .map(|path| path.display().to_string())
+}
+
+/// Picks the two model files from a folder or two (none when the picker is cancelled).
+#[tauri::command]
+async fn pick_model_files(app: AppHandle) -> Vec<String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("Use Model Files")
+        .add_filter("GGUF model files", &["gguf"])
+        .pick_files(move |files| {
+            let _ = sender.send(files);
+        });
+    let picked = receiver.await.ok().flatten().unwrap_or_default();
+    picked.into_iter().filter_map(|file| file.into_path().ok()).map(|path| path.display().to_string()).collect()
+}
+
+/// What choosing a folder would mean (fast: sizes, not hashes), before Settings asks.
+#[tauri::command]
+fn model_folder_plan(shell: State<'_, Arc<Shell>>, target: String) -> Value {
+    let picked = PathBuf::from(target);
+    let target = models::chosen_folder(&picked);
+    let current = shell.models_folder();
+    let settings = shell.settings.lock().unwrap().clone();
+    let free = models::free_space(&target);
+    let plan = models::plan(&target, &current, models::complete(&current), settings.models_volume, free);
     json!({
-        "index": index.as_ref().map(|folder| folder.display().to_string()),
-        "indexBytes": size("index.sqlite"),
-        "codeBytes": size("code.sqlite"),
-        "models": models.map(|folder| folder.display().to_string()),
+        "kind": plan.kind.as_str(),
+        "picked": picked.display().to_string(),
+        "target": target.display().to_string(),
+        "current": current.display().to_string(),
+        "missing": plan.missing,
+        "free": plan.free,
+        "problem": plan.problem,
+        "canDownload": plan.can_download,
     })
+}
+
+/// Moves, copies or adopts the model files, then makes the folder active. Returns at once; progress comes as
+/// `model-transfer` events.
+#[tauri::command]
+fn model_folder_apply(app: AppHandle, shell: State<'_, Arc<Shell>>, target: String, action: String)
+    -> Result<(), String> {
+    // `--models` pins the folder for a development run; saving another one would only look applied, because every
+    // helper keeps using the pinned folder (and a move would delete the files it still points at).
+    if shell.options.models.is_some() {
+        return Err("This run was started with --models; restart DigUp without it to change the model folder.".into());
+    }
+    if !["use", "download", "move"].contains(&action.as_str()) {
+        return Err(format!("not a model folder action: {action}"));
+    }
+    let target = models::chosen_folder(&PathBuf::from(target));
+    shell.begin_models(false)?;
+    let current = shell.models_folder();
+    let settings = shell.settings.lock().unwrap().clone();
+    let free = models::free_space(&target);
+    let plan = models::plan(&target, &current, models::complete(&current), settings.models_volume, free);
+    if plan.kind == models::Kind::Invalid {
+        shell.end_models();
+        return Err(plan.problem.unwrap_or_else(|| "That folder can't be used.".into()));
+    }
+    let action = match (action.as_str(), plan.kind) {
+        ("use", models::Kind::Use) => "use",
+        ("download", models::Kind::Use) | ("move", models::Kind::Use) => "use",
+        ("download", models::Kind::Move) | ("download", models::Kind::Download) => "download",
+        ("move", models::Kind::Move) => "move",
+        ("move", _) => {
+            shell.end_models();
+            return Err("The model files now aren't all there, so they can't be moved.".into());
+        }
+        ("use", _) => {
+            shell.end_models();
+            return Err("That folder doesn't have both model files yet.".into());
+        }
+        _ => unreachable!("the action was checked"),
+    }.to_string();
+    let app = app.clone();
+    let work = shell.inner().clone();
+    let folder = target.clone();
+    std::thread::spawn(move || {
+        let result = apply_model_folder(&app, &work, &folder, &action);
+        match &result {
+            Ok(()) => set_transfer_state(&app, &work, json!({"state": "done", "folder": folder.display().to_string()})),
+            Err(message) => set_transfer_state(&app, &work, json!({"state": "failed", "message": message})),
+        }
+        work.end_models();
+        let _ = app.emit("model-files", json!({"folder": folder.display().to_string()}));
+    });
+    Ok(())
+}
+
+/// Settings → Storage: the model files are gone on purpose; don't fetch them at the next start. Stops everything that
+/// holds them open first.
+#[tauri::command]
+fn delete_model_files(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Result<(), String> {
+    if shell.options.models.is_some() {
+        return Err("This run was started with --models; restart DigUp without it to delete the model.".into());
+    }
+    shell.begin_models(false)?;
+    let folder = shell.models_folder();
+    let settings = shell.settings.lock().unwrap().clone();
+    let result = (|| -> Result<(), String> {
+        match models::folder_state(&folder, settings.models_volume) {
+            models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder => {
+                return Err(format!("The model folder is unavailable: {}", folder.display()));
+            }
+            models::FolderState::Available | models::FolderState::Missing => {}
+        }
+        stop_model_helpers(&app);
+        models::delete_files(&folder)?;
+        {
+            let mut settings = shell.settings.lock().unwrap();
+            settings.model_removed = true;
+            settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+        }
+        shell.model_rerun.store(false, Ordering::SeqCst);
+        set_model_state(&app, &shell, json!({"state": "missing", "folder": folder.display().to_string()}));
+        let _ = app.emit("model-files", json!({"folder": folder.display().to_string()}));
+        Ok(())
+    })();
+    shell.end_models();
+    result
+}
+
+/// Settings → Storage: downloads the model again after a delete (the flag that stopped the automatic download goes).
+#[tauri::command]
+fn download_model(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Result<(), String> {
+    if shell.models_busy.load(Ordering::SeqCst) {
+        return Err("Another model operation is running.".into());
+    }
+    let folder = shell.models_folder();
+    let settings = shell.settings.lock().unwrap().clone();
+    match models::folder_state(&folder, settings.models_volume) {
+        models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder => {
+            return Err(format!("The model folder is unavailable: {}", folder.display()));
+        }
+        models::FolderState::Available | models::FolderState::Missing => {}
+    }
+    if shell.options.models.is_none() {
+        let mut settings = shell.settings.lock().unwrap();
+        settings.model_removed = false;
+        settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+    }
+    set_model_state(&app, &shell, json!({"state": "checking", "folder": folder.display().to_string()}));
+    let _ = app.emit("model-files", json!({"folder": folder.display().to_string()}));
+    shell.model.run(&shell.download_launch()).map_err(|error| {
+        set_model_state(&app, &shell, json!({"state": "failed", "folder": folder.display().to_string(),
+                                             "message": error}));
+        error
+    })
+}
+
+/// Settings → Storage → Check Files: size and SHA-256, naming a damaged file.
+#[tauri::command]
+async fn model_check(shell: State<'_, Arc<Shell>>) -> Result<Value, String> {
+    let shell = shell.inner().clone();
+    shell.begin_models(true)?;
+    let worker = shell.clone();
+    let checked = tauri::async_runtime::spawn_blocking(move || {
+        let folder = worker.models_folder();
+        verify_folder(None, &worker, &folder, false).map(|(ok, files)| {
+            json!({"ok": ok, "folder": folder.display().to_string(), "files": files})
+        })
+    }).await;
+    shell.end_models();
+    checked.map_err(|error| format!("the check stopped: {error}"))?
+}
+
+/// Settings → Storage → Use Model Files…: copies files chosen from another folder into the active model folder
+/// (verifying each first) and starts using them. Files already in the active folder are verified in place.
+#[tauri::command]
+fn model_import(app: AppHandle, shell: State<'_, Arc<Shell>>, files: Vec<String>) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("Choose the model files first.".into());
+    }
+    shell.begin_models(false)?;
+    let folder = shell.models_folder();
+    let settings = shell.settings.lock().unwrap().clone();
+    match models::folder_state(&folder, settings.models_volume) {
+        models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder => {
+            shell.end_models();
+            return Err(format!("The model folder is unavailable: {}", folder.display()));
+        }
+        models::FolderState::Available | models::FolderState::Missing => {}
+    }
+    let app = app.clone();
+    let work = shell.inner().clone();
+    std::thread::spawn(move || {
+        stop_model_helpers(&app);
+        set_model_state(&app, &work, json!({"state": "checking", "folder": folder.display().to_string()}));
+        let result = (|| -> Result<(), String> {
+            std::fs::create_dir_all(&folder).map_err(|error| format!("Can't make {}: {error}", folder.display()))?;
+            work.transfer.run(work.model_import_launch(&folder, &files), |event| transfer_event(&app, &event))?;
+            let (ok, checked) = verify_folder(Some(&app), &work, &folder, true)?;
+            if !ok {
+                return Err(verify_problem(&folder, &checked));
+            }
+            clear_model_removed(&work);
+            remember_models_volume(&work);
+            set_model_state(&app, &work, json!({"state": "ready", "folder": folder.display().to_string()}));
+            let _ = app.emit("model-files", json!({"folder": folder.display().to_string()}));
+            measure_then_index(&app);
+            Ok(())
+        })();
+        match result {
+            Ok(()) => set_transfer_state(&app, &work, json!({"state": "done", "folder": folder.display().to_string()})),
+            Err(message) => {
+                // The old files are usually still there: a source that didn't check out changes nothing.
+                if models::complete(&folder) {
+                    set_model_state(&app, &work, json!({"state": "ready", "folder": folder.display().to_string()}));
+                    measure_then_index(&app);
+                } else {
+                    set_model_state(&app, &work, json!({"state": "failed", "folder": folder.display().to_string(),
+                                                       "message": message}));
+                }
+                set_transfer_state(&app, &work, json!({"state": "failed", "message": message}));
+            }
+        }
+        work.end_models();
+        let _ = app.emit("model-files", json!({}));
+    });
+    Ok(())
+}
+
+/// Settings → Storage: the files left in the old folder after a move, once the new model is ready.
+#[tauri::command]
+fn delete_old_model_files(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Result<(), String> {
+    shell.begin_models(false)?;
+    let cleanup = shell.settings.lock().unwrap().model_cleanup.clone();
+    let Some(cleanup) = cleanup else {
+        shell.end_models();
+        return Ok(());
+    };
+    if models::same_path(Path::new(&cleanup), &shell.models_folder()) {
+        shell.end_models();
+        return Err("Those files are the model in use.".into());
+    }
+    let result = models::delete_files(Path::new(&cleanup));
+    if result.is_ok() {
+        let mut settings = shell.settings.lock().unwrap();
+        if settings.model_cleanup.as_deref() == Some(&cleanup) {
+            settings.model_cleanup = None;
+            settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+        }
+        drop(settings);
+        let _ = app.emit("model-files", json!({"cleanup": cleanup}));
+        changed(&app);
+    }
+    shell.end_models();
+    result
+}
+
+/// The model's names, sizes, hashes and download addresses, from the helper (the shell doesn't keep a second copy).
+#[tauri::command]
+fn model_manifest(shell: State<'_, Arc<Shell>>) -> Result<Value, String> {
+    models::manifest(shell.launch(vec!["model-manifest".to_string()], "model.log"))
+}
+
+/// Setup's model step, Download: the chosen folder (None: the default or an older install's folder) becomes the model
+/// folder, and the download starts there. Nothing is made or fetched before this call.
+#[tauri::command]
+fn setup_model_download(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: Option<String>)
+    -> Result<(), String> {
+    let target = folder.filter(|folder| !folder.trim().is_empty())
+        .map(|folder| models::chosen_folder(&PathBuf::from(folder)))
+        .unwrap_or_else(|| shell.models_folder());
+    match models::folder_state(&target, None) {
+        models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder => {
+            return Err(format!("That model folder can't be used: {}", target.display()));
+        }
+        models::FolderState::Available | models::FolderState::Missing => {}
+    }
+    if shell.options.models.is_none() {
+        {
+            let mut settings = shell.settings.lock().unwrap();
+            settings.models_folder = Some(target.display().to_string());
+            settings.models_volume = models::volume_id(&target);
+            settings.model_removed = false;
+            settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+        }
+        shell.search.set_launch(shell.search_launch());
+    }
+    set_model_state(&app, &shell, json!({"state": "checking", "folder": target.display().to_string()}));
+    let _ = app.emit("model-files", json!({"folder": target.display().to_string()}));
+    start_model(&app, &shell);
+    Ok(())
+}
+
+/// Setup's model step, Use Existing Folder: the two files are checked in place, and that folder becomes the model folder
+/// (nothing is copied or downloaded).
+#[tauri::command]
+async fn setup_model_use(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: String) -> Result<(), String> {
+    let shell = shell.inner().clone();
+    if shell.options.models.is_some() {
+        return Err("This run was started with --models; restart DigUp without it to choose the model.".into());
+    }
+    let target = models::chosen_folder(&PathBuf::from(folder));
+    if !models::complete(&target) {
+        return Err(format!("The two model files aren't both in {}.", target.display()));
+    }
+    match models::folder_state(&target, None) {
+        models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder => {
+            return Err(format!("That model folder can't be used: {}", target.display()));
+        }
+        models::FolderState::Available | models::FolderState::Missing => {}
+    }
+    shell.begin_models(false)?;
+    // Hashing both files takes a while: it runs off the window's thread, so the page stays responsive.
+    let worker = shell.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        // A download chosen earlier in setup may still be writing: stop it before the files are hashed.
+        stop_model_helpers(&app);
+        let (ok, files) = verify_folder(None, &worker, &target, false)?;
+        if !ok {
+            return Err(verify_problem(&target, &files));
+        }
+        {
+            let mut settings = worker.settings.lock().unwrap();
+            settings.models_folder = Some(target.display().to_string());
+            settings.models_volume = models::volume_id(&target);
+            settings.model_removed = false;
+            settings.save(&worker.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+        }
+        worker.search.set_launch(worker.search_launch());
+        set_model_state(&app, &worker, json!({"state": "ready", "folder": target.display().to_string()}));
+        let _ = app.emit("model-files", json!({"folder": target.display().to_string()}));
+        measure_then_index(&app);
+        Ok(())
+    }).await.map_err(|error| format!("the check stopped: {error}"))?;
+    shell.end_models();
+    result
+}
+
+/// Setup's model step, Skip: no download now, and none at the next start; Settings can add it later. Search stays
+/// keyword-only until then.
+#[tauri::command]
+fn setup_model_skip(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Result<(), String> {
+    if shell.options.models.is_some() {
+        return Err("This run was started with --models; restart DigUp without it to skip the model.".into());
+    }
+    shell.begin_models(false)?;
+    let result = (|| -> Result<(), String> {
+        stop_model_helpers(&app);
+        {
+            let mut settings = shell.settings.lock().unwrap();
+            settings.model_removed = true;
+            settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+        }
+        set_model_state(&app, &shell, json!({"state": "missing"}));
+        let _ = app.emit("model-files", json!({}));
+        Ok(())
+    })();
+    shell.end_models();
+    result
 }
 
 /// Settings → General, recording a new shortcut: the current one is let go meanwhile (`held`), so that pressing it
@@ -1683,12 +2274,17 @@ fn set_confirm_delete(shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), Stri
 /// again with the new environment when next needed).
 #[tauri::command]
 fn set_processor_only(app: AppHandle, shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), String> {
+    if shell.models_busy.load(Ordering::SeqCst) {
+        return Err("A model operation is running; try again when it finishes.".into());
+    }
     {
         let mut settings = shell.settings.lock().unwrap();
         settings.processor_only = on;
         settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
     }
-    shell.search.stop();
+    // The next search process gets the new DIGUP_DEVICE; without set_launch it would keep the old environment until
+    // DigUp is restarted.
+    shell.search.set_launch(shell.search_launch());
     shell.index.stop();
     later(&app, run_index);
     Ok(())
@@ -2010,43 +2606,165 @@ fn index_ended(app: &AppHandle, event: &Value) {
     }
 }
 
+/// What the pages show about the model now, and a state event so setup and Settings follow.
+fn set_model_state(app: &AppHandle, shell: &Arc<Shell>, state: Value) {
+    *shell.model_state.lock().unwrap() = state.clone();
+    let _ = app.emit("model", state);
+    changed(app);
+}
+
+/// Writes the volume the folder is on now (the first successful use, and after a change).
+fn remember_models_volume(shell: &Arc<Shell>) {
+    // A development run's `--models` isn't the person's chosen folder: its volume mustn't be remembered for one.
+    if shell.options.models.is_some() { return; }
+    let Some(volume) = models::volume_id(&shell.models_folder()) else { return };
+    let mut settings = shell.settings.lock().unwrap();
+    if settings.models_volume != Some(volume) {
+        settings.models_volume = Some(volume);
+        let _ = settings.save(&shell.settings_path);
+    }
+}
+
+/// The model files are there after all (copied in by hand, or a move that has gone through): the person didn't delete
+/// them, so the next start mustn't skip the download.
+fn clear_model_removed(shell: &Arc<Shell>) {
+    if shell.options.models.is_some() { return; }
+    let mut settings = shell.settings.lock().unwrap();
+    if settings.model_removed {
+        settings.model_removed = false;
+        let _ = settings.save(&shell.settings_path);
+    }
+}
+
+/// The model at startup: use it where it is, fetch what's missing, or say why nothing can run. Never moves or deletes
+/// anything.
+fn start_model(app: &AppHandle, shell: &Arc<Shell>) {
+    let folder = shell.models_folder();
+    let settings = shell.settings.lock().unwrap().clone();
+    let folder_state = models::folder_state(&folder, settings.models_volume);
+    if models::complete(&folder) {
+        clear_model_removed(shell);
+        remember_models_volume(shell);
+        set_model_state(app, shell, json!({"state": "ready", "folder": folder.display().to_string()}));
+        cleanup_old(app);
+        measure_then_index(app);
+        return;
+    }
+    match folder_state {
+        models::FolderState::Unavailable => {
+            set_model_state(app, shell, json!({"state": "unavailable", "folder": folder.display().to_string(),
+                "message": format!("The model folder is unavailable: {}", folder.display())}));
+            return;
+        }
+        models::FolderState::WrongVolume => {
+            set_model_state(app, shell, json!({"state": "unavailable", "folder": folder.display().to_string(),
+                "message": format!("The model folder is on a different disk than when it was chosen: {}", folder.display())}));
+            return;
+        }
+        models::FolderState::NotFolder => {
+            set_model_state(app, shell, json!({"state": "unavailable", "folder": folder.display().to_string(),
+                "message": format!("The model path isn't a folder: {}", folder.display())}));
+            return;
+        }
+        models::FolderState::Available | models::FolderState::Missing => {}
+    }
+    // `--models` is a development choice: it isn't the folder the person deleted from, so its download isn't skipped.
+    if settings.model_removed && shell.options.models.is_none() {
+        set_model_state(app, shell, json!({"state": "missing", "folder": folder.display().to_string()}));
+        return;
+    }
+    set_model_state(app, shell, json!({"state": "checking", "folder": folder.display().to_string()}));
+    if let Err(error) = shell.model.run(&shell.download_launch()) {
+        model_event(app, json!({"event": "error", "message": error}));
+    }
+}
+
+/// After the new model is ready, the old folder of a move goes: only the two known files and their partials, retried
+/// here and at the next start if Windows still holds one.
+fn cleanup_old(app: &AppHandle) {
+    let shell = app.state::<Arc<Shell>>().inner().clone();
+    let cleanup = shell.settings.lock().unwrap().model_cleanup.clone();
+    let Some(cleanup) = cleanup else { return };
+    if models::same_path(Path::new(&cleanup), &shell.models_folder()) {
+        let mut settings = shell.settings.lock().unwrap();
+        if settings.model_cleanup.as_deref() == Some(&cleanup) {
+            settings.model_cleanup = None;
+            let _ = settings.save(&shell.settings_path);
+        }
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        match models::delete_files(Path::new(&cleanup)) {
+            Ok(()) => {
+                {
+                    let mut settings = shell.settings.lock().unwrap();
+                    if settings.model_cleanup.as_deref() == Some(&cleanup) {
+                        settings.model_cleanup = None;
+                        let _ = settings.save(&shell.settings_path);
+                    }
+                }
+                let _ = app.emit("model-files", json!({"cleanup": cleanup}));
+                changed(&app);
+            }
+            Err(error) => {
+                eprintln!("digup-shell: the old model files couldn't be deleted ({cleanup}): {error}");
+            }
+        }
+    });
+}
+
 fn model_event(app: &AppHandle, event: Value) {
     if cfg!(debug_assertions) && event["event"] != "progress" {
         println!("model: {event}");
     }
     let shell = app.state::<Arc<Shell>>().inner().clone();
+    // A folder change or a delete stops the download on purpose, and a deleted model has none: its last words (or a
+    // late progress line) mustn't start another download or make the model look downloading again.
+    if shell.models_busy.load(Ordering::SeqCst) || shell.settings.lock().unwrap().model_removed {
+        return;
+    }
     let before = shell.model_state.lock().unwrap().clone();
+    let folder = shell.models_folder().display().to_string();
     let state = match event["event"].as_str().unwrap_or_default() {
         "progress" => {
             let (bytes, total) = (event["all_bytes"].as_f64().unwrap_or(0.0), event["all_total"].as_f64().unwrap_or(1.0));
-            json!({"state": "downloading", "bytes": bytes, "total": total})
+            json!({"state": "downloading", "folder": folder, "bytes": bytes, "total": total})
         }
-        "file" => json!({"state": "downloading", "from": event["from"]}),
-        "verifying" => json!({"state": "checking"}),
-        "waiting" => json!({"state": "waiting"}),
+        "file" => json!({"state": "downloading", "folder": folder, "from": event["from"]}),
+        "verifying" => json!({"state": "checking", "folder": folder}),
+        "waiting" => json!({"state": "waiting", "folder": folder}),
         // Where it got to stays shown while it waits to try again.
-        "retry" => json!({"state": "downloading", "bytes": before["bytes"], "total": before["total"], "problem": event["message"]}),
+        "retry" => json!({"state": "downloading", "folder": folder, "bytes": before["bytes"], "total": before["total"],
+                           "problem": event["message"]}),
         "done" => {
             shell.model_rerun.store(false, Ordering::SeqCst);
-            json!({"state": "ready"})
+            // A delete or a folder change may have overtaken this download: its files are gone (or its folder isn't the
+            // one in use any more). Saying "ready" then would hide that, and the next start would download again.
+            if !models::complete(&shell.models_folder()) {
+                return;
+            }
+            remember_models_volume(&shell);
+            clear_model_removed(&shell);
+            json!({"state": "ready", "folder": folder})
         }
-        "error" => json!({"state": "failed", "message": event["message"]}),
+        "error" => json!({"state": "failed", "folder": folder, "message": event["message"]}),
         // The helper ended without saying done or why. The files may all be there (it died after the last one on
         // some Linux systems before 0.7.0-beta.2): run it once more, which verifies them and says done, or goes on.
         "stopped" => {
             if !shell.model_rerun.swap(true, Ordering::SeqCst) && shell.model.run(&shell.download_launch()).is_ok() {
-                json!({"state": "checking"})
+                json!({"state": "checking", "folder": folder})
             } else {
-                json!({"state": "failed", "message": "the download stopped"})
+                json!({"state": "failed", "folder": folder, "message": "the download stopped"})
             }
         }
         _ => return,
     };
     let ready = state["state"] == "ready";
-    *shell.model_state.lock().unwrap() = state.clone();
-    let _ = app.emit("model", state);
-    changed(app);
+    set_model_state(app, &shell, state);
     if ready {
+        let _ = app.emit("model-files", json!({"folder": folder}));
+        cleanup_old(app);
         measure_then_index(app);
     }
 }
@@ -2076,9 +2794,7 @@ fn measure_then_index(app: &AppHandle) {
         // virus scanner reads the new files, and at a login everything starts at once.
         let mut command = std::process::Command::new(&shell.options.helper);
         command.args(["speed", "--model", "--if-needed", "--when-quiet", "60", "--json"]).args(shell.index_arguments());
-        if let Some(models) = &shell.options.models {
-            command.env("DIGUP_MODELS", models);
-        }
+        command.envs(shell.helper_env());
         // Its reply goes to speed.log after what it said on the way (the model's own lines go to the index's worker.log).
         let log = std::fs::OpenOptions::new().create(true).append(true).open(shell.logs.join("speed.log")).ok();
         if let Some(log) = log.as_ref().and_then(|log| log.try_clone().ok()) {

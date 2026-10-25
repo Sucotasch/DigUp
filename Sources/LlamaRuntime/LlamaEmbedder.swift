@@ -325,6 +325,21 @@ public final class LlamaEmbedder: Embedder {
     }()
     nonisolated(unsafe) private static var gpuFound = false
 
+    /// The first discrete GPU's memory: free right now and in total, in bytes. Nil without one (an integrated GPU uses
+    /// the system's memory, and is left out: its `memory_free` says nothing about what fits beside the model).
+    public static var gpuMemory: (free: Int, total: Int)? {
+        _ = backend
+        for index in 0..<ggml_backend_dev_count() {
+            guard let device = ggml_backend_dev_get(index),
+                  ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_GPU else { continue }
+            var free = 0
+            var total = 0
+            ggml_backend_dev_memory(device, &free, &total)
+            return (Int(free), Int(total))
+        }
+        return nil
+    }
+
     private static func isGPU(_ device: ggml_backend_dev_t?) -> Bool {
         let type = ggml_backend_dev_type(device)
         return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU

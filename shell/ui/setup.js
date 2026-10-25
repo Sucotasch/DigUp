@@ -24,6 +24,9 @@ let firstTime = true;
 let estimatesStarted = false;
 let codeEstimatesStarted = false;
 let info = { offered: [], chosen: [], skipped: [], hotkey: "", model: { state: "checking" }, state: {}, auto: false };
+let modelTarget = null;       // the folder the model step will download to; null: the default/older folder
+let modelMessage = "";        // what the model step says after a choice (an error, or where files were found)
+let modelProblem = false;
 const codeMode = new URLSearchParams(location.search).has("code");
 
 // MARK: Paths
@@ -368,10 +371,12 @@ function render() {
   $("back").hidden = firstTime ? page === 0 || page === PAGES.length - 1 : false;
   $("back").textContent = firstTime ? "Back" : "Cancel";
   $("next").textContent = !firstTime ? "Save" : page === PAGES.length - 1 ? "Done"
+    : PAGES[page] === "model" ? "Download Model"
     : PAGES[page] === "folders" && selection.chosen.length ? "Start indexing" : "Continue";
-  $("next").disabled = page === 1 && !selection.folders().length;
+  $("next").disabled = PAGES[page] === "folders" && !selection.folders().length;
   $("model").hidden = codeMode || page === 0 || page === PAGES.length - 1;
   renderFooter();
+  if (PAGES[page] === "model") renderModel();
   if (PAGES[page] === "ready") renderProgress();
   if (PAGES[page] === "code") renderCode();
   if (PAGES[page] === "folders" && !estimatesStarted) {
@@ -385,7 +390,7 @@ function render() {
 }
 
 function renderFooter() {
-  $("next").disabled = page === 1 && !selection.folders().length;
+  $("next").disabled = PAGES[page] === "folders" && !selection.folders().length;
   let summary = "";
   if (PAGES[page] === "folders") {
     if (!selection.folders().length) summary = "Choose at least one folder";
@@ -410,8 +415,137 @@ function renderFooter() {
   $("summary").textContent = summary;
 }
 
+/// The model step's note: a choice that went wrong, or what the chosen folder means. `problem` colors it as an error.
+function modelNote(text, problem = true) {
+  modelMessage = text || "";
+  modelProblem = problem;
+  if (PAGES[page] === "model") renderModel();
+}
+
+/// Where the model step will put the model, and what's there now. Nothing has been downloaded before Download.
+function renderModel() {
+  const storage = info.storage || {};
+  const model = progress.model || info.model || {};
+  const path = modelTarget || storage.models || "";
+  $("model-path").textContent = path ? native(path) : "";
+  let note = modelMessage;
+  let problem = modelMessage ? modelProblem : false;
+  if (!note) {
+    const folderProblem = ["unavailable", "wrong-volume", "not-folder"].includes(storage.modelsFolderState);
+    if (folderProblem) {
+      note = storage.modelsFolderState === "unavailable"
+        ? "This folder is on a disk that isn't connected. Choose another folder, or skip for now."
+        : "This folder can't be used. Choose another folder, or skip for now.";
+      problem = true;
+    } else if (model.state === "downloading") {
+      const done = model.total ? Math.floor((100 * model.bytes) / model.total) : null;
+      note = done == null ? "Downloading the model…" : `Downloading the model · ${done}%`;
+    } else if (model.state === "waiting") {
+      note = "Waiting for the network to download the model…";
+    } else if (model.state === "ready") {
+      note = "The model files are in this folder.";
+    } else if (model.state === "failed") {
+      note = model.message || "The download failed. Try again, or choose another folder.";
+      problem = true;
+    } else if (model.state === "unavailable") {
+      note = model.message || "The model folder is unavailable.";
+      problem = true;
+    } else if (model.state === "missing") {
+      note = "Not installed. Download it now, use files you already have, or skip for now.";
+    } else if (model.state === "checking") {
+      note = "Checking the model…";
+    } else {
+      note = "Download it now, use files you already have, or skip for now.";
+    }
+  }
+  $("model-note").textContent = note;
+  $("model-note").hidden = !note;
+  $("model-note").className = "progress-note" + (problem ? " problem" : "");
+  if (PAGES[page] === "model") {
+    const downloading = model.state === "downloading" || model.state === "waiting";
+    $("next").textContent = downloading ? "Downloading…" : model.state === "ready" ? "Continue" : "Download Model";
+    $("next").disabled = downloading;
+  }
+}
+
+$("model-change").addEventListener("click", async () => {
+  const picked = await invoke("pick_model_folder");
+  if (!picked) return;
+  try {
+    const plan = await invoke("model_folder_plan", { target: picked });
+    if (plan.kind === "invalid") {
+      modelNote(plan.problem || "That folder can't be used.");
+      return;
+    }
+    modelTarget = plan.target;
+    modelMessage = "";
+    if (plan.kind === "use") {
+      modelNote("Both model files are in this folder. Download will use them; Use Existing Folder… checks them first.", false);
+    } else {
+      modelNote(`The model will be downloaded to ${native(plan.target)}.`, false);
+    }
+    renderModel();
+  } catch (error) {
+    modelNote(String(error));
+  }
+});
+
+$("model-use").addEventListener("click", async () => {
+  const picked = await invoke("pick_model_folder");
+  if (!picked) return;
+  $("model-use").disabled = true;
+  try {
+    const plan = await invoke("model_folder_plan", { target: picked });
+    if (plan.kind !== "use") {
+      if (plan.kind !== "invalid") {
+        modelTarget = plan.target;
+        modelMessage = "";
+      }
+      modelNote(plan.problem || "The two model files aren't both in that folder. Choose the folder that has them, or download the model.");
+      return;
+    }
+    modelTarget = plan.target;
+    modelMessage = "";
+    modelNote("Checking the model files…", false);
+    await invoke("setup_model_use", { folder: plan.target });
+    page += 1;
+    render();
+  } catch (error) {
+    modelNote(String(error));
+  } finally {
+    $("model-use").disabled = false;
+  }
+});
+
+$("model-skip").addEventListener("click", async () => {
+  $("model-skip").disabled = true;
+  try {
+    await invoke("setup_model_skip");
+    page += 1;
+    render();
+  } catch (error) {
+    modelNote(String(error));
+  } finally {
+    $("model-skip").disabled = false;
+  }
+});
+
 $("next").addEventListener("click", async () => {
   const name = PAGES[page];
+  if (name === "model") {
+    $("next").disabled = true;
+    modelMessage = "";
+    try {
+      await invoke("setup_model_download", { folder: modelTarget });
+    } catch (error) {
+      modelNote(String(error));
+      $("next").disabled = false;
+      return;
+    }
+    page += 1;
+    render();
+    return;
+  }
   if (name === "folders") {
     $("next").disabled = true;
     try {
@@ -500,6 +634,9 @@ function renderProgress() {
   } else if (model.state === "failed") {
     label = "The model couldn't download";
     note = model.message || "";
+  } else if (model.state === "missing" || model.state === "unavailable") {
+    label = model.state === "missing" ? "The model isn't installed" : "The model folder is unavailable";
+    note = model.message || "Open Settings → Storage to download the model or choose another folder. Until then, search finds files by name.";
   } else if (state.measuring) {
     label = "Checking this computer's speed";
     busy = true;
@@ -604,6 +741,8 @@ function showModel(model) {
     waiting: "Waiting for the network to download the model",
     ready: "Model ready",
     failed: `The model couldn't download: ${model.message || "unknown error"}`,
+    missing: "The model isn't installed",
+    unavailable: model.message || "The model folder is unavailable",
   };
   let text = lines[model.state] || "";
   if (model.state === "downloading") {
@@ -613,6 +752,7 @@ function showModel(model) {
     if (model.problem) text += ` (${model.problem}, trying again)`;
   }
   $("model").textContent = text;
+  if (PAGES[page] === "model") renderModel();
   if (PAGES[page] === "ready") renderProgress();
 }
 
@@ -670,7 +810,16 @@ function element(tag, className, text) {
 async function start() {
   info = await invoke(codeMode ? "code_setup_info" : "setup_info");
   firstTime = !info.setUp;
-  if (firstTime && info.codeOffered?.length) PAGES = ["welcome", "folders", "code", "shortcut", "ready"];
+  // A first launch chooses about the model before any of it downloads: where it goes, an older copy to reuse, or
+  // no model yet. A computer that has it already goes straight on.
+  const needsModel = firstTime && !codeMode && info.model?.state !== "ready";
+  if (firstTime && info.codeOffered?.length) {
+    PAGES = needsModel
+      ? ["welcome", "model", "folders", "code", "shortcut", "ready"]
+      : ["welcome", "folders", "code", "shortcut", "ready"];
+  } else if (needsModel) {
+    PAGES = ["welcome", "model", "folders", "shortcut", "ready"];
+  }
   if (codeMode) {
     $("folders").querySelector("h2").textContent = "Which code should DigUp search?";
     $("folders-subtitle").textContent = "Pick the folders with your code, and open one to leave out some of its "

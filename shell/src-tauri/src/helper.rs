@@ -29,7 +29,7 @@ pub struct Launch {
 }
 
 impl Launch {
-    fn spawn(&self) -> Result<(Child, ChildStdin, ChildStdout), String> {
+    pub(crate) fn spawn(&self) -> Result<(Child, ChildStdin, ChildStdout), String> {
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
@@ -113,7 +113,8 @@ fn reap(child: &mut Child) -> Option<i32> {
 
 /// `digup search-service`: started on the first request, and again after it died.
 pub struct SearchService {
-    launch: Launch,
+    /// The launch for the next process: the model folder and the device can change while the shell runs.
+    launch: Mutex<Launch>,
     running: Arc<Mutex<Option<Searching>>>,
     next_id: AtomicU64,
     on_event: EventSink,
@@ -130,11 +131,30 @@ struct Searching {
 impl SearchService {
     pub fn new(launch: Launch, on_event: impl Fn(Value) + Send + Sync + 'static) -> SearchService {
         SearchService {
-            launch,
+            launch: Mutex::new(launch),
             running: Arc::default(),
             next_id: AtomicU64::new(1),
             on_event: Arc::new(on_event),
         }
+    }
+
+    /// The next search process starts with this launch (a new model folder, the processor instead of the GPU): the one
+    /// running now is stopped, so the change reaches the helper instead of waiting for the next start of DigUp.
+    pub fn set_launch(&self, launch: Launch) {
+        // The running process is taken while the launch is still held: a request can't slip in with the old
+        // environment between the two.
+        let mut current = self.launch.lock().unwrap();
+        *current = launch;
+        let running = self.running.lock().unwrap().take();
+        drop(current);
+        if let Some(searching) = running {
+            stop(searching.child, searching.stdin, &json!({"op": "quit"}).to_string());
+        }
+    }
+
+    #[cfg(test)]
+    fn env(&self) -> Vec<(String, String)> {
+        self.launch.lock().unwrap().env.clone()
     }
 
     /// Sends a request and waits for its reply.
@@ -150,6 +170,10 @@ impl SearchService {
     }
 
     fn send(&self, id: u64, request: &Value) -> Result<oneshot::Receiver<Value>, String> {
+        // The launch stays locked until the process is started: a request that arrives as the folder changes either
+        // starts with the old folder before `set_launch`, or (holding both locks) with the new one after it — never
+        // with the old environment and the new folder's process slot.
+        let launch = self.launch.lock().unwrap();
         let mut running = self.running.lock().unwrap();
         if let Some(searching) = running.as_mut() {
             if !matches!(searching.child.try_wait(), Ok(None)) {
@@ -157,7 +181,7 @@ impl SearchService {
             }
         }
         if running.is_none() {
-            *running = Some(self.start()?);
+            *running = Some(self.start(&launch)?);
         }
         let searching = running.as_mut().unwrap();
         let (sender, receiver) = oneshot::channel();
@@ -170,8 +194,8 @@ impl SearchService {
         Ok(receiver)
     }
 
-    fn start(&self) -> Result<Searching, String> {
-        let (child, stdin, stdout) = self.launch.spawn()?;
+    fn start(&self, launch: &Launch) -> Result<Searching, String> {
+        let (child, stdin, stdout) = launch.spawn()?;
         let number = STARTED.fetch_add(1, Ordering::Relaxed);
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> = Arc::default();
         let (replies, on_event, slot) = (pending.clone(), self.on_event.clone(), self.running.clone());
@@ -373,6 +397,23 @@ impl ModelDownload {
 /// On Windows the helpers go into a job that closes with this process, so they end even if the shell crashes (on Linux
 /// and macOS the helpers watch their parent themselves: `ParentWatch` in Sources/digup). Their own children follow
 /// them into it.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launch(folder: &str) -> Launch {
+        Launch { program: PathBuf::from("digup"), args: vec!["search-service".into()],
+                 env: vec![("DIGUP_MODELS".into(), folder.into())], log: None, background: false }
+    }
+
+    #[test]
+    fn a_new_launch_reaches_the_next_search_process() {
+        let service = SearchService::new(launch("C:/old"), |_| {});
+        assert_eq!(service.env(), vec![("DIGUP_MODELS".into(), "C:/old".into())]);
+        service.set_launch(launch("G:/Ai/DigUp/Models/embeddinggemma-2"));
+        assert_eq!(service.env(), vec![("DIGUP_MODELS".into(), "G:/Ai/DigUp/Models/embeddinggemma-2".into())]);
+    }
+}
 #[cfg(windows)]
 mod job {
     use std::os::windows::io::AsRawHandle;

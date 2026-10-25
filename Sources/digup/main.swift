@@ -30,8 +30,12 @@ let usage = """
       digup search-service <folder>... [--code-root DIR]... [--encoder-idle S]
                                               the searcher as a process, index open and encoder warm (JSON lines;
                                               see SearchService): for shells that can't link DigUpKit
-      digup download-model [--to DIR]         the model files, from the Hugging Face cache or downloaded with
+      digup download-model [--to DIR] [--check]
+                                              the model files, from the Hugging Face cache or downloaded with
                                               resume, checked (JSON lines: see DownloadModel)
+      digup model-manifest                    the model files' names, sizes, hashes and download addresses (JSON)
+      digup model-verify --to DIR             size and SHA-256 of each model file (JSON lines)
+      digup model-import --to DIR FILE...     copy chosen model files into DIR, checked (JSON lines)
 
     Options:
       --index DIR          index folder (default: DigUp's Application Support folder; see `digup status`)
@@ -201,6 +205,43 @@ func makeEmbedder(textOnly: Bool, log: URL, qos: QualityOfService = .default) th
         return try EmbeddingWorker(config, textOnly: textOnly)
     }
     return try LlamaEmbedder(models: try LlamaModels.locate(), textOnly: textOnly, log: log)
+}
+
+/// The indexing helper's embedder: `DIGUP_INDEX_WORKERS=4` puts images and audio through that many worker processes
+/// (each with its own model), which is what fills a fast GPU; 1, or the variable unset, keeps the in-process model.
+func makeIndexEmbedder(log: URL) throws -> any Embedder {
+    let count = indexWorkerCount()
+    guard count > 1 else {
+        return try makeEmbedder(textOnly: false, log: log, qos: .utility)
+    }
+    let executable = Bundle.main.executableURL
+        ?? URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+    do {
+        return try WorkerPool(count: count, executable: executable, log: log)
+    } catch {
+        // The card couldn't hold that many models, or a worker wouldn't start: one model in this process is slower
+        // but works (and the run continues; an index that never finishes is worse than one that takes longer).
+        FileHandle.standardError.write(Data("one embedding process instead of \(count): \(error)\n".utf8))
+        return try makeEmbedder(textOnly: false, log: log, qos: .utility)
+    }
+}
+
+/// How many embedding processes the indexing helper should use: `DIGUP_INDEX_WORKERS`, on a GPU (on the processor one
+/// process is as good, and the model's memory is the same each time). "auto" (what the app sets) leaves the number to
+/// the graphics card's free memory: 2 GB a worker, measured 1.5 GB at four (`docs/image-embedding-performance.md`).
+func indexWorkerCount() -> Int {
+    let choice = ProcessInfo.processInfo.environment["DIGUP_INDEX_WORKERS"]
+    guard !LlamaEmbedder.cpuOnly else { return 1 }
+    if let count = choice.flatMap(Int.init) {
+        return count > 1 && LlamaEmbedder.hasGPU ? min(count, 8) : 1
+    }
+    // Metal's unified memory says nothing about how many models fit: the pool is measured on CUDA only.
+    #if os(macOS)
+    if choice == "auto" { return 1 }
+    #endif
+    guard choice == "auto", let memory = LlamaEmbedder.gpuMemory else { return 1 }
+    // Each process embeds its text on up to 8 threads: four of them on a four-core machine would only contend.
+    return max(1, min(4, memory.free / (2 << 30), ProcessInfo.processInfo.activeProcessorCount / 2))
 }
 
 /// `makeEmbedder`'s vector source when it's known without starting it: llama.cpp's always is.
@@ -417,12 +458,14 @@ func status(_ args: Arguments) throws {
 func indexService(_ args: Arguments) throws -> Int32 {
     // One model for both indexes, started when the first file needs it (`SharedEmbedder`).
     let model = SharedEmbedder {
-        try makeEmbedder(textOnly: false, log: args.indexFolder.appendingPathComponent("worker.log"), qos: .utility)
+        try makeIndexEmbedder(log: args.indexFolder.appendingPathComponent("worker.log"))
     }
     func part(_ file: String, options: IndexOptions, roots: [URL]) throws -> IndexService.Part {
         let store = try IndexStore(directory: args.indexFolder, file: file)
         let indexer = try Indexer(store: store, options: options, makeEmbedder: { try model.embedder() })
         indexer.costsFolder = args.indexFolder   // what indexing costs here, for later estimates
+        // Several workers embed a batch faster than one thread reads the next: keep that many picture batches ready.
+        indexer.prepareAhead = max(1, indexWorkerCount())
         // A new app version may bring a new model: the index starts over by itself (keyword search on names goes on).
         indexer.embedderSource = embedderSource()
         indexer.resetOnModelChange = { indexed, now in
@@ -696,7 +739,7 @@ do {
         exit(0)
     }
     let args = try Arguments(raw.dropFirst())
-    if ["index-service", "worker", "search-service", "download-model"].contains(command)
+    if ["index-service", "worker", "search-service", "download-model", "model-verify", "model-import"].contains(command)
         || command == "estimate" && args.flags.contains("--json") {
         ParentWatch.start()   // an app's helper goes when the app does
     }
@@ -730,6 +773,9 @@ do {
     case "worker": exit(workerService(args))
     case "search-service": exit(try searchService(args))
     case "download-model": exit(try downloadModel(args))
+    case "model-manifest": exit(modelManifest(args))
+    case "model-verify": exit(modelVerify(args))
+    case "model-import": exit(modelImport(args))
     default:
         print(usage)
         exit(2)

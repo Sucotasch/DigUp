@@ -122,6 +122,13 @@ button.link { background: none; border: 0; color: var(--ember); padding: 10px 2p
 
 .note { font-size: 11px; color: var(--secondary); margin-top: 18px; }
 
+/* The model step: where it goes, and the choice not to download it yet. */
+.model-card { margin-top: 20px; }
+.model-card .path { margin-top: 4px; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.model-card .problem { color: var(--ember); }
+.model-actions { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+.model-actions .link { padding: 6px 2px; }
+
 .keys { display: flex; gap: 6px; margin: 8px 0 4px; }
 .key {
   min-width: 44px; padding: 8px 12px; text-align: center; font-size: 16px; font-weight: 500;

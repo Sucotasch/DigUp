@@ -24,6 +24,9 @@ let summaries = null;        // what's indexed under each folder (search-service
 let removing = null;         // the folder whose removal is being confirmed
 let codeSummaries = null;    // what's indexed under each code folder
 let removingCode = null;     // the code folder whose removal is being confirmed
+let modelMessage = "";      // what the last model action said ("2 of 2 files verified", a failure)
+let modelProblem = false;    // …and whether it was a failure
+let modelConfirm = null;     // { run, alternate } for the model question on screen
 
 // MARK: Tabs
 
@@ -437,14 +440,230 @@ $("code-off-go").onclick = async () => {
 
 function renderStorage() {
   const storage = info.storage || {}, model = (info.state || {}).model || {};
-  const states = { ready: "Downloaded", checking: "Checking…", waiting: "Waiting for the network", failed: "The download stopped" };
+  const transfer = info.transfer || storage.transfer || { state: "idle" };
+  const states = {
+    ready: "Downloaded", checking: "Checking…", waiting: "Waiting for the network", failed: "The download stopped",
+    missing: "Not installed", unavailable: "The model folder is unavailable", verifying: "Checking files…",
+  };
   $("model-status").textContent = model.state === "downloading"
     ? `Downloading · ${model.total ? Math.floor((100 * model.bytes) / model.total) : 0}%` : states[model.state] || "";
   pathButton($("model-path"), storage.models);
+  const busy = ["working", "verifying", "waiting"].includes(transfer.state);
+  const downloading = model.state === "downloading";
+  // The speed check holds the model: changing the folder or deleting the files waits for it (the shell refuses too).
+  // Checking the files only reads them, so it may go on.
+  const measuring = (info.state || {}).measuring === true;
+  for (const id of ["model-change", "model-files", "model-download", "model-delete", "model-cleanup-delete"]) {
+    $(id).disabled = busy || downloading || measuring;
+  }
+  $("model-check").disabled = busy || downloading;
+  $("model-download").hidden = !(storage.modelRemoved || ["missing", "failed"].includes(model.state));
+  $("model-delete").hidden = ["missing", "unavailable"].includes(model.state);
+  $("model-transfer-row").hidden = ["idle", "done"].includes(transfer.state);
+  $("model-transfer").textContent = transferText(transfer);
+  const cleanup = storage.modelCleanup;
+  $("model-cleanup").hidden = !cleanup;
+  $("model-cleanup-text").textContent = cleanup
+    ? `Old model files: ${shown(cleanup)} · ${bytes(storage.modelCleanupBytes || 0)}` : "";
+  const note = transfer.state === "working" && transfer.problem ? transfer.problem
+    : model.state === "failed" ? model.message : transfer.state === "failed" ? transfer.message : modelMessage;
+  const problem = model.state === "failed" || transfer.state === "failed" || modelProblem;
+  $("model-note").hidden = !note;
+  $("model-note").textContent = note || "";
+  $("model-note").className = "note" + (problem ? " problem" : "");
   $("index-size").textContent = bytes(storage.indexBytes || 0) + (storage.codeBytes ? ` (code ${bytes(storage.codeBytes)})` : "");
   pathButton($("index-path"), storage.index);
   $("version").textContent = `DigUp ${info.version || ""} · EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).`;
   $("licenses").hidden = !info.licenses;
+}
+
+function transferText(transfer) {
+  if (transfer.state === "waiting") return "Waiting for the network";
+  if (transfer.state === "verifying") return `Checking ${transfer.name || "the model files"}…`;
+  if (transfer.state === "working") {
+    const percent = transfer.allTotal ? Math.floor((100 * (transfer.allBytes || 0)) / transfer.allTotal) : null;
+    return percent != null ? `${percent}%` : transfer.name ? `Working on ${transfer.name}…` : "Working…";
+  }
+  if (transfer.state === "failed") return "It didn't finish";
+  return "";
+}
+
+/// The model question under the facts: `go` is the button, `alternate` the second choice (a download instead of a
+/// move), and `danger` paints the main button red.
+function askModel(text, go, run, alternate, alternateLabel, danger) {
+  modelConfirm = { run, alternate };
+  $("model-confirm-text").textContent = text;
+  $("model-confirm-go").textContent = go;
+  $("model-confirm-go").className = danger ? "danger" : "";
+  $("model-confirm-alt").hidden = !alternate;
+  $("model-confirm-alt").textContent = alternate ? alternateLabel : "";
+  $("model-confirm").hidden = false;
+}
+
+function closeModelConfirm() {
+  modelConfirm = null;
+  $("model-confirm").hidden = true;
+}
+
+function modelNote(text, problem = false) {
+  modelMessage = text || "";
+  modelProblem = problem;
+  renderStorage();
+}
+
+async function changeModelFolder() {
+  try {
+    const picked = await invoke("pick_model_folder");
+    if (!picked) return;
+    const plan = await invoke("model_folder_plan", { target: picked });
+    if (plan.kind === "invalid") {
+      modelNote(plan.problem || "That folder can't be used.", true);
+      return;
+    }
+    const target = plan.target;
+    if (plan.kind === "use") {
+      askModel(`Use the model files in ${shown(target)}? They're checked before DigUp switches; nothing is copied.`,
+               "Use Files", () => applyModelFolder(target, "use"));
+    } else if (plan.kind === "move") {
+      askModel(`Move the model files to ${shown(target)}? They're copied and checked, and the old folder stays until the new
+        copy is ready.${plan.canDownload ? " You can download a second copy instead." : ""}`,
+               "Move", () => applyModelFolder(target, "move"),
+               plan.canDownload ? () => applyModelFolder(target, "download") : null,
+               "Download a Copy");
+    } else {
+      askModel(`Download the model (865 MB) to ${shown(target)}? The current model stays usable until it's ready.`,
+               "Download", () => applyModelFolder(target, "download"));
+    }
+  } catch (error) {
+    modelNote(String(error), true);
+  }
+}
+
+async function applyModelFolder(target, action) {
+  modelMessage = "";
+  modelProblem = false;
+  // The first event comes once the helper starts; until then the buttons must already know it's busy.
+  info.transfer = { state: "working" };
+  renderStorage();
+  try {
+    await invoke("model_folder_apply", { target, action });
+  } catch (error) {
+    info.transfer = { state: "idle" };
+    modelNote(String(error), true);
+    await refresh();
+  }
+  // A finished or failed transfer sends `model-files`, which asks the settings again.
+}
+
+async function useModelFiles() {
+  try {
+    const files = await invoke("pick_model_files");
+    if (!files.length) return;
+    if (files.length !== 2) {
+      modelNote("Choose both model files: embeddinggemma-2-Q8_0.gguf and mmproj-embeddinggemma-2-Q8_0.gguf.", true);
+      return;
+    }
+    const folders = files.map((file) => file.replace(/[\\/][^\\/]*$/, ""));
+    if (folders.every((folder) => samePath(folder, folders[0]))) {
+      const plan = await invoke("model_folder_plan", { target: folders[0] });
+      if (plan.kind !== "use") {
+        modelNote(plan.problem || "Those files aren't both the right size for this model.", true);
+        return;
+      }
+      askModel(`Use the model files in ${shown(plan.target)}? They're checked before DigUp switches.`,
+               "Use Files", () => applyModelFolder(plan.target, "use"));
+      return;
+    }
+    const target = (info.storage || {}).models;
+    if (!target) {
+      modelNote("DigUp has no model folder to copy them into.", true);
+      return;
+    }
+    askModel(`Copy the model files into ${shown(target)}? Each is checked before it replaces anything.`,
+             "Copy Files", async () => {
+               modelMessage = "";
+               modelProblem = false;
+               info.transfer = { state: "working" };
+               renderStorage();
+               try {
+                 await invoke("model_import", { files });
+               } catch (error) {
+                 info.transfer = { state: "idle" };
+                 modelNote(String(error), true);
+                 await refresh();
+               }
+             });
+  } catch (error) {
+    modelNote(String(error), true);
+  }
+}
+
+async function checkModelFiles() {
+  try {
+    const result = await invoke("model_check");
+    if (result.ok) {
+      modelNote(`${result.files.length} of ${result.files.length} files verified.`);
+    } else {
+      const bad = (result.files || []).find((file) => !file.ok);
+      modelNote(bad ? `${bad.name}: ${bad.problem || "not usable"}` : "The model files aren't usable.", true);
+    }
+  } catch (error) {
+    modelNote(String(error), true);
+  }
+}
+
+async function downloadModelFiles() {
+  try {
+    await invoke("download_model");
+    modelMessage = "";
+    modelProblem = false;
+  } catch (error) {
+    modelNote(String(error), true);
+  }
+  await refresh();
+}
+
+function askDeleteModelFiles() {
+  const storage = info.storage || {};
+  const files = (storage.modelFiles || []).map((file) => `${file.name} (${file.bytes ? bytes(file.bytes) : ""})`).join("\n");
+  askModel(`Delete the model files from ${shown(storage.models || "")}?\n${files}\n\nSearch keeps finding files by name, but
+    indexing stops until the model is downloaded again. The index stays, so nothing is read again.`,
+           "Delete Files", async () => {
+             try {
+               await invoke("delete_model_files");
+               modelMessage = "";
+               modelProblem = false;
+             } catch (error) {
+               modelNote(String(error), true);
+             }
+             await refresh();
+           }, null, null, true);
+}
+
+function askDeleteOldModelFiles() {
+  const storage = info.storage || {};
+  askModel(`Delete the old model files in ${shown(storage.modelCleanup || "")} (${bytes(storage.modelCleanupBytes || 0)})?`,
+           "Delete Old Files", async () => {
+             try {
+               await invoke("delete_old_model_files");
+               modelMessage = "";
+               modelProblem = false;
+             } catch (error) {
+               modelNote(String(error), true);
+             }
+             await refresh();
+           }, null, null, true);
+}
+
+async function copyModelLinks() {
+  try {
+    const manifest = await invoke("model_manifest");
+    const links = (manifest.files || []).map((file) => file.url).join("\n");
+    await navigator.clipboard.writeText(links);
+    modelNote("The two download links are on the clipboard.");
+  } catch (error) {
+    modelNote(String(error), true);
+  }
 }
 
 /// A folder's path; a click shows it in the file manager.
@@ -514,6 +733,35 @@ function fail(error) {
   $("problem").textContent = String(error);
   $("problem").hidden = false;
 }
+
+// MARK: Model actions
+
+$("model-change").onclick = () => changeModelFolder();
+$("model-files").onclick = () => useModelFiles();
+$("model-check").onclick = () => checkModelFiles();
+$("model-download").onclick = () => downloadModelFiles();
+$("model-delete").onclick = () => askDeleteModelFiles();
+$("model-cleanup-delete").onclick = () => askDeleteOldModelFiles();
+$("model-links").onclick = () => copyModelLinks();
+$("model-confirm-cancel").onclick = () => closeModelConfirm();
+$("model-confirm-go").onclick = () => {
+  const action = modelConfirm;
+  closeModelConfirm();
+  action?.run();
+};
+$("model-confirm-alt").onclick = () => {
+  const action = modelConfirm;
+  closeModelConfirm();
+  action?.alternate?.();
+};
+
+tauri.event.listen("model-transfer", ({ payload }) => {
+  info.transfer = payload;
+  renderStorage();
+});
+
+// The folder or its files changed (a transfer finished, old files went): the facts and buttons are asked again.
+tauri.event.listen("model-files", () => { refresh().catch(() => {}); });
 
 // MARK: Start
 

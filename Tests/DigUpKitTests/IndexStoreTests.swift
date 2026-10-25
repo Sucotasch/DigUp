@@ -107,7 +107,9 @@ import WinSDK
 
     @Test func missingModelFilesInDownloadOrder() throws {
         #expect(ModelFiles.missing(in: folder) == [ModelFiles.text, ModelFiles.media])
-        FileManager.default.createFile(atPath: folder.appendingPathComponent(ModelFiles.text.name).path, contents: nil)
+        let text = folder.appendingPathComponent(ModelFiles.text.name)
+        _ = FileManager.default.createFile(atPath: text.path, contents: nil)
+        try FileHandle(forWritingTo: text).truncate(atOffset: UInt64(ModelFiles.text.bytes))
         #expect(ModelFiles.missing(in: folder) == [ModelFiles.media])
         #expect(ModelFiles.totalBytes == 864_676_480)
     }
@@ -120,7 +122,7 @@ import WinSDK
         try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
         let blob = blobs.appendingPathComponent("2188ac1d")
-        FileManager.default.createFile(atPath: blob.path, contents: nil)
+        _ = FileManager.default.createFile(atPath: blob.path, contents: nil)
         try FileHandle(forWritingTo: blob).truncate(atOffset: UInt64(ModelFiles.text.bytes))
         try FileManager.default.createSymbolicLink(at: snapshot.appendingPathComponent(ModelFiles.text.name),
                                                    withDestinationURL: blob)

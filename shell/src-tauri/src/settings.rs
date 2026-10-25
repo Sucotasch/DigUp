@@ -46,6 +46,14 @@ pub struct Settings {
     pub confirm_delete_off: bool,
     /// When DigUp last checked for updates (seconds since 1970).
     pub update_checked: u64,
+    /// The folder with both model files (Settings → Storage). None: the default folder.
+    pub models_folder: Option<String>,
+    /// The volume the folder was chosen on: a drive letter that comes back with another disk must not be written to.
+    pub models_volume: Option<u64>,
+    /// The person deleted the model files: don't download them again on the next start.
+    pub model_removed: bool,
+    /// The old folder after a move: its files go once the new model is ready (retried at the next start on failure).
+    pub model_cleanup: Option<String>,
 }
 
 /// The window's size inside its frame (logical pixels), where it was (physical; Wayland doesn't tell), and whether it
@@ -74,5 +82,29 @@ impl Settings {
         let temporary = path.with_extension("json.new");
         std::fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
         std::fs::rename(temporary, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_settings_survive_a_round_trip_and_older_files_default_them() {
+        let folder = std::env::temp_dir().join(format!("DigUp-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("settings.json");
+        let settings = Settings { models_folder: Some("G:\\Ai\\Модели".into()), models_volume: Some(42),
+                                      model_removed: true, model_cleanup: Some("C:\\old".into()), ..Settings::default() };
+        settings.save(&path).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.models_folder, settings.models_folder);
+        assert_eq!(loaded.models_volume, Some(42));
+        assert!(loaded.model_removed);
+        assert_eq!(loaded.model_cleanup, settings.model_cleanup);
+        std::fs::write(&path, br#"{"setUp":true}"#).unwrap();
+        let older = Settings::load(&path);
+        assert!(older.models_folder.is_none() && older.models_volume.is_none() && !older.model_removed);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

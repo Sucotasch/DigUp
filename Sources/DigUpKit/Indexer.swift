@@ -50,6 +50,10 @@ public final class Indexer {
     /// The index folder, where what indexing costs on this Mac is kept (`MeasuredCosts`) for estimates. Unset: nothing
     /// is kept.
     public var costsFolder: URL?
+    /// How many picture batches may be read and decoded ahead of the model (other kinds: one, as before). More than 1
+    /// pays only when the model work runs on several workers (`WorkerPool`): one thread then reads no faster than they
+    /// embed, and the workers would sit idle between batches.
+    public var prepareAhead = 1
     private var measured = MeasuredCosts()
 
     public init(store: IndexStore, options: IndexOptions, makeEmbedder: @escaping () throws -> any Embedder) throws {
@@ -251,24 +255,40 @@ public final class Indexer {
     ///
     /// Two stages overlap: while the model embeds one job, the next one is read and decoded on another thread
     /// (images scaled, screenshots OCR'd, PDF pages rendered, audio and video decoded). OCR alone is ~0.24 s per Retina
-    /// screenshot, about as long as embedding it.
+    /// screenshot, about as long as embedding it. With `prepareAhead` above 1 several picture batches are read at once,
+    /// for a model spread over several workers: one reading thread would keep them waiting (measured 2026-10-25).
     private func process(_ jobs: [Job], shouldStop: () -> Bool,
                          committed: (Int, Job, [(String, String?)], Double) -> Void,
                          skip: (Job) -> Bool = { _ in false }) throws {
-        var ahead: PendingBatch?
+        var ahead: [(pictures: Bool, batch: PendingBatch)] = []
+        var next = 0   // the first job not prepared yet
+        // A job prepared for a run that stopped early: throw its files away (waiting: its reading is under way).
         defer {
-            // A job prepared for a run that stopped early: throw its files away.
-            if let ahead { try? FileManager.default.removeItem(at: ahead.wait().folder) }
+            for item in ahead { try? FileManager.default.removeItem(at: item.batch.wait().folder) }
             if let costsFolder, !measured.tallies.isEmpty {
                 MeasuredCosts.merge(measured, into: costsFolder)
                 measured = MeasuredCosts()
             }
         }
+        func fill() {
+            // Only pictures are read several ahead: their model work is spread over the workers while reading them is
+            // cheap. Other kinds stay one ahead (a video's frames take memory, and their model work doesn't scale).
+            let depth = max(1, prepareAhead)
+            while ahead.count < depth, next < jobs.count {
+                let upcoming = jobs[next]
+                let kind = upcoming.files[0].kind
+                let pictures = kind == .image || kind == .screenshot
+                if !pictures, ahead.contains(where: { !$0.pictures }) { break }
+                ahead.append((pictures, prepare(upcoming)))
+                next += 1
+            }
+        }
         for (index, job) in jobs.enumerated() {
             guard !shouldStop() else { break }
+            fill()
             let started = Date()
-            let prepared = (ahead ?? prepare(job)).wait()
-            ahead = index + 1 < jobs.count ? prepare(jobs[index + 1]) : nil
+            let prepared = ahead.removeFirst().batch.wait()
+            fill()   // the next batches are read while this one is embedded
             defer { try? FileManager.default.removeItem(at: prepared.folder) }
             guard !skip(job) else { continue }
             // The helper's and the CLI's main thread has no run loop to drain what Foundation autoreleases while a job
@@ -407,19 +427,32 @@ public final class Indexer {
         }
     }
 
-    private let preparing = DispatchQueue(label: "DigUp.prepare", qos: .utility)
+    // Concurrent: `prepareAhead` picture batches are read at the same time (their scratch folders are their own).
+    private let preparing = DispatchQueue(label: "DigUp.prepare", qos: .utility, attributes: .concurrent)
     private var jobsPrepared = 0   // names the scratch folders
 
     /// The file being read (extracted) right now, and since when: for a watchdog. Apple's frameworks have run away on
     /// some files (PDF text extraction growing by gigabytes a minute, never returning), and nothing stops them from
-    /// outside but ending the process, so it has to know which file that was. One value for the whole process, since
-    /// files are read one at a time.
-    public static var nowReading: (path: String, since: Date)? { readingLock.withLock { reading } }
-    nonisolated(unsafe) private static var reading: (path: String, since: Date)?
+    /// outside but ending the process, so it has to know which file that was. With `prepareAhead` several files are
+    /// read at once; the one that has been read longest is the one worth reporting (and timing).
+    public static var nowReading: (path: String, since: Date)? {
+        readingLock.withLock { reads.values.min { $0.since < $1.since } }
+    }
+    nonisolated(unsafe) private static var reads: [Int: (path: String, since: Date)] = [:]
+    nonisolated(unsafe) private static var nextRead = 0
     private static let readingLock = NSLock()
 
-    private static func startReading(_ path: String) {
-        readingLock.withLock { reading = (path, Date()) }
+    /// Marks `path` as being read by the calling thread until `finishReading` (each read has its own token).
+    private static func startReading(_ path: String) -> Int {
+        readingLock.withLock {
+            nextRead += 1
+            reads[nextRead] = (path, Date())
+            return nextRead
+        }
+    }
+
+    private static func finishReading(_ token: Int) {
+        readingLock.withLock { reads[token] = nil }
     }
 
     private func prepare(_ job: Job) -> PendingBatch {
@@ -436,8 +469,8 @@ public final class Indexer {
         let batch = job.files
         var prepared = Prepared(batch: batch, step: job.step, folder: folder)
         let url = URL(fileURLWithPath: batch[0].path)
-        startReading(batch[0].path)
-        defer { readingLock.withLock { reading = nil } }
+        var reading = startReading(batch[0].path)
+        defer { finishReading(reading) }
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             switch batch[0].kind {
@@ -446,7 +479,8 @@ public final class Indexer {
                 var ready: [ReadyImage] = []
                 for (slot, file) in batch.enumerated() {
                     let url = URL(fileURLWithPath: file.path)
-                    startReading(file.path)
+                    finishReading(reading)
+                    reading = startReading(file.path)
                     do {
                         let image = try ImageExtractor.prepare(url, maxPixel: screenshot ? 1536 : 1024,
                                                                minSide: options.minImageSide, to: folder,

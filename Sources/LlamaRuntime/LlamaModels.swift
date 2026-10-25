@@ -28,10 +28,13 @@ public struct LlamaModels: Sendable {
     /// stay pending.
     public static func locate() throws -> LlamaModels {
         for folder in folders {
-            let text = folder.appendingPathComponent(textFile)
-            guard FileManager.default.fileExists(atPath: text.path) else { continue }
-            let media = folder.appendingPathComponent(mediaFile)
-            return LlamaModels(text: text, media: FileManager.default.fileExists(atPath: media.path) ? media : nil)
+            // A file with the right name but the wrong size is a broken download, not a model: leave it for
+            // `download-model` to replace rather than handing it to llama.cpp.
+            let text = ModelFiles.check(ModelFiles.text, in: folder)
+            guard text.ok else { continue }
+            let media = ModelFiles.check(ModelFiles.media, in: folder)
+            return LlamaModels(text: folder.appendingPathComponent(textFile),
+                               media: media.ok ? folder.appendingPathComponent(mediaFile) : nil)
         }
         throw WorkerError.notFound("no \(textFile) in " + folders.map(\.path).joined(separator: ", ")
             + "; get it with: hf download \(repository) \(textFile) \(mediaFile) --revision \(revision)")

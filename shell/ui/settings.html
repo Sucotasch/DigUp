@@ -162,7 +162,29 @@
         <div class="fact"><span>EmbeddingGemma 2</span><span>Google · Apache 2.0 · 865 MB</span></div>
         <div class="fact"><span>Status</span><span id="model-status"></span></div>
         <div class="fact"><span>Location</span><button class="path-button" id="model-path"></button></div>
+        <div class="fact" id="model-transfer-row" hidden><span>Transfer</span><span id="model-transfer"></span></div>
       </div>
+      <div class="model-actions">
+        <button id="model-change">Change Folder…</button>
+        <button id="model-files">Use Model Files…</button>
+        <button id="model-check">Check Files</button>
+        <button id="model-download" hidden>Download Model…</button>
+        <button class="danger-link" id="model-delete">Delete Model Files…</button>
+      </div>
+      <p class="note" id="model-note" hidden></p>
+      <div class="cleanup" id="model-cleanup" hidden>
+        <span id="model-cleanup-text"></span>
+        <button class="link danger" id="model-cleanup-delete">Delete Old Files</button>
+      </div>
+      <div class="confirm" id="model-confirm" hidden>
+        <p id="model-confirm-text"></p>
+        <div class="actions">
+          <button id="model-confirm-cancel">Cancel</button>
+          <button id="model-confirm-alt" hidden></button>
+          <button id="model-confirm-go"></button>
+        </div>
+      </div>
+      <button class="link inline" id="model-links">Copy Download Links</button>
       <h3>Index</h3>
       <div class="card facts">
         <div class="fact"><span>Size on disk</span><span id="index-size"></span></div>

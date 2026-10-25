@@ -21,9 +21,28 @@
         <li><span class="tile"><svg viewBox="0 0 24 24"><path d="M3 12 H5 M7 8 V16 M10 5 V19 M13 9 V15 M16 6 V18 M19 10 V14 M21 12 H22"/></svg></span><div><b>Moments inside audio and video</b>
           <span>“where they talk about sleep”, “the part with the drums”</span></div></li>
       </ul>
-      <p class="privacy">Everything is indexed and searched on this computer. DigUp downloads its AI model (865 MB)
-        once; after that it works offline, and nothing you index ever leaves your computer. Next, DigUp looks through
-        your usual folders, and any with code, to say how long each would take; nothing is indexed until you choose.</p>
+      <p class="privacy">Everything is indexed and searched on this computer. DigUp's AI model (865 MB) is downloaded
+        once, only after you choose where it goes; it can also use files you already have. After that DigUp works
+        offline, and nothing you index ever leaves your computer. Next, DigUp looks through your usual folders, and any
+        with code, to say how long each would take; nothing is indexed until you choose.</p>
+    </section>
+
+    <section class="page" id="model" hidden>
+      <h2>Where should the model live?</h2>
+      <p class="subtitle">DigUp needs its AI model (865 MB) once. Download it to the folder below, use files you
+        already have, or skip this for now and add it later in Settings.</p>
+      <div class="progress-card model-card">
+        <div class="progress-line">
+          <span class="progress-what">Model folder</span>
+          <button class="link" id="model-change">Change…</button>
+        </div>
+        <p class="progress-note path" id="model-path"></p>
+        <p class="progress-note problem" id="model-note" hidden></p>
+      </div>
+      <div class="model-actions">
+        <button id="model-use">Use Existing Folder…</button>
+        <button class="link" id="model-skip">Skip for Now</button>
+      </div>
     </section>
 
     <section class="page" id="folders" hidden>
