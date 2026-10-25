@@ -20,6 +20,14 @@ const FILTER_OF_KIND = { screenshot: "screenshots", image: "images", pdf: "docum
 const MEDIA = new Set(["screenshot", "image", "video", "audio"]);
 /// Its chip, next to All: the four kinds above, with a key of its own (Ctrl+M) so the numbered chips keep theirs.
 const MEDIA_FILTER = { key: "media", title: "Media", kinds: [...MEDIA] };
+/// The table's columns, in order; Properties is what the other columns don't say (a picture's size, a PDF's pages…).
+const COLUMNS = [
+  { key: "name", title: "Name" },
+  { key: "size", title: "Size" },
+  { key: "type", title: "Type" },
+  { key: "date", title: "Date" },
+  { key: "properties", title: "Properties" },
+];
 const EXAMPLES = [
   ["a screenshot of an error message", "screenshots"], ["receipt", "documents"], ["whiteboard notes", "images"],
   ["someone laughing", "audio"], ["a dog on the beach", "video"], ["slides about the budget", "documents"],
@@ -55,6 +63,8 @@ const state = {
   note: null,           // what the status bar says for a moment after an operation
   showWeaker: false,
   showsPreview: true,
+  view: "grid",         // how the results are shown: a grid of pictures, or a table (code stays a list)
+  sort: null,           // the table's column and direction: { key, desc }; null keeps the best match first
   navigated: false,     // the selection was moved by the arrow keys or a click since the last edit: ← → move it then
   generation: 0,
   timer: null,
@@ -140,9 +150,11 @@ function setFilter(key) {
   run();
 }
 
-/// Every result shown, in order: the strong ones, then the weaker ones once they're unfolded.
+/// Every result shown, in the order it's shown: the strong ones, then the weaker ones once they're unfolded; in the
+/// table, each group by the column chosen.
 function rows() {
-  return [...state.ranked, ...(state.showWeaker ? state.weaker : [])];
+  const sorted = (hits) => (state.view === "table" && state.sort ? sortedHits(hits) : hits);
+  return [...sorted(state.ranked), ...(state.showWeaker ? sorted(state.weaker) : [])];
 }
 
 function selectedHit() {
@@ -182,6 +194,8 @@ function renderBar() {
     $kinds.append(chip("Code", "code", code ? state.counts.code : null, code,
                        () => setFilter(state.filter === "code" ? null : "code"), 7));
   }
+  $("toggle-view").hidden = code;
+  updateViewButton();
 }
 
 /// All · Screenshots 4 · Images 9 · …: what the query found of each kind; a click shows only that kind.
@@ -206,6 +220,7 @@ function renderContent() {
   else if (!state.hasResults) $content.append(centered(element("div", "spinner")));
   else if (!state.ranked.length && !state.weaker.length) $content.append(nothingFound());
   else if (isCode()) $content.append(codeList());
+  else if (state.view === "table") $content.append(resultsTable());
   else $content.append(grid());
   syncActiveDescendant();
 }
@@ -218,6 +233,137 @@ function grid() {
     if (state.showWeaker) box.append(cells(state.weaker, "grid weaker-results"));
   }
   return box;
+}
+
+/// The results as a table: Name, Size, Type, Date and Properties, sorted by a click on a heading. The chosen files are
+/// ticked here too, and Move To, Copy To and Delete work on them as in the grid.
+function resultsTable() {
+  const wrap = element("div", "table-wrap");
+  const table = element("table", "results-table");
+  table.setAttribute("role", "grid");
+  table.setAttribute("aria-label", "Results");
+  if (isWindows) table.setAttribute("aria-multiselectable", "true");
+  const head = element("thead");
+  const headRow = element("tr");
+  if (isWindows) {
+    const cell = element("th", "check");
+    cell.setAttribute("role", "columnheader");
+    cell.setAttribute("aria-label", "Select");
+    headRow.append(cell);
+  }
+  for (const column of COLUMNS) {
+    const cell = element("th", column.key);
+    cell.setAttribute("role", "columnheader");
+    cell.setAttribute("aria-sort", state.sort?.key === column.key ? (state.sort.desc ? "descending" : "ascending") : "none");
+    const button = element("button", "sort" + (state.sort?.key === column.key ? " sorted" : ""));
+    button.append(column.title);
+    if (state.sort?.key === column.key) button.append(element("span", "arrow", state.sort.desc ? "↓" : "↑"));
+    button.title = `Sort by ${column.title}`;
+    button.onmousedown = (event) => event.preventDefault();
+    button.onclick = () => sortBy(column.key);
+    cell.append(button);
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const body = element("tbody");
+  for (const hit of sortedHits(state.ranked)) body.append(tableRow(hit));
+  if (state.weaker.length) {
+    const row = element("tr", "weaker-row");
+    const cell = element("td");
+    cell.colSpan = COLUMNS.length + (isWindows ? 1 : 0);
+    cell.append(weakerToggle());
+    row.append(cell);
+    body.append(row);
+    if (state.showWeaker) for (const hit of sortedHits(state.weaker)) body.append(tableRow(hit));
+  }
+  table.append(head, body);
+  wrap.append(table);
+  return wrap;
+}
+
+/// One result in the table: its kind's icon, its name and the place that matched, size, type, date, and what the other
+/// columns leave out.
+function tableRow(hit) {
+  const chosen = state.selected.has(hit.path);
+  const row = element("tr", "result-row" + (hit.path === state.selection ? " selected" : "") + (chosen ? " checked" : ""));
+  row.dataset.path = hit.path;
+  row.setAttribute("role", "row");
+  row.setAttribute("aria-selected", String(chosen));
+  if (isWindows) {
+    const cell = tableCell("check");
+    if (MEDIA.has(hit.kind)) cell.append(checkboxFor(hit));
+    row.append(cell);
+  }
+  const nameCell = tableCell("name-column");
+  const name = element("div", "table-name");
+  const icon = element("span", "type-icon");
+  icon.innerHTML = ICONS[hit.kind] || ICONS.doc;
+  const text = element("span", "name", "‎" + nameOf(hit.path));
+  text.title = nameOf(hit.path);
+  name.append(icon, text);
+  const place = placeOf(hit);
+  if (place) name.append(element("span", "place", place));
+  nameCell.append(name);
+  const type = typeOf(hit), date = dateOf(hit.modified), properties = propertiesOf(hit);
+  const typeCell = tableCell("type", type);
+  typeCell.title = type;
+  const dateCell = tableCell("date", date);
+  dateCell.title = date;
+  const propertiesCell = tableCell("properties", properties);
+  propertiesCell.title = properties;
+  row.append(nameCell, tableCell("size", hit.size > 0 ? bytes(hit.size) : ""), typeCell, dateCell, propertiesCell);
+  wire(row, hit);
+  return row;
+}
+
+function tableCell(className, text) {
+  const cell = element("td", className, text);
+  cell.setAttribute("role", "gridcell");
+  return cell;
+}
+
+/// A click on a heading sorts by it; a second click turns the order around.
+function sortBy(key) {
+  state.sort = state.sort?.key === key ? { key, desc: !state.sort.desc } : { key, desc: false };
+  renderContent();
+}
+
+/// The results by the table's column, in the direction chosen; without a column, the best match first.
+function sortedHits(hits) {
+  if (!state.sort) return hits;
+  const { key, desc } = state.sort;
+  const value = (hit) => {
+    switch (key) {
+      case "name": return nameOf(hit.path).toLocaleLowerCase();
+      case "size": return Number(hit.size) || 0;
+      case "type": return typeOf(hit).toLocaleLowerCase();
+      case "date": return Number(hit.modified) || 0;
+      default: return propertiesOf(hit).toLocaleLowerCase();
+    }
+  };
+  return [...hits].sort((a, b) => {
+    const left = value(a), right = value(b);
+    const order = typeof left === "number" ? left - right : left.localeCompare(right, undefined, { numeric: true });
+    return order ? order * (desc ? -1 : 1) : nameOf(a.path).localeCompare(nameOf(b.path), undefined, { numeric: true });
+  });
+}
+
+/// The table's Type: the extension as file managers show it, or what kind it is when it has none.
+function typeOf(hit) {
+  const extension = extensionOf(hit.path);
+  return extension ? extension.toUpperCase() : KIND_TITLE[hit.kind] || "File";
+}
+
+/// What the other columns don't say: a picture's size, a document's pages, a recording's length, code's lines.
+function propertiesOf(hit) {
+  const info = hit.info || {};
+  const parts = [];
+  if (info.width && info.height) parts.push(`${info.width} × ${info.height}`);
+  if (info.pages) parts.push(Number(info.pages) === 1 ? "1 page" : `${Number(info.pages).toLocaleString()} pages`);
+  else if (info.read_to != null) parts.push("partly read");
+  if (info.lines) parts.push(Number(info.lines) === 1 ? "1 line" : `${Number(info.lines).toLocaleString()} lines`);
+  if (info.duration) parts.push(clock(Number(info.duration)));
+  return parts.join(" · ");
 }
 
 function cells(hits, className) {
@@ -241,18 +387,7 @@ function cell(hit) {
   item.setAttribute("aria-label", `${KIND_TITLE[hit.kind] || "File"}, ${nameOf(hit.path)}, ${reasonOf(hit)}`);
   const picture = element("div", "picture");
   picture.append(cellPicture(hit));
-  if (isWindows && MEDIA.has(hit.kind)) {
-    const box = element("button", "checkbox");
-    box.type = "button";
-    box.setAttribute("role", "checkbox");
-    box.setAttribute("aria-checked", String(chosen));
-    box.setAttribute("aria-label", `Select ${nameOf(hit.path)}`);
-    box.innerHTML = ICONS.check;
-    // Its press is its own: it neither starts a drag of the file nor takes the keyboard from the field.
-    box.onmousedown = (event) => { event.stopPropagation(); event.preventDefault(); };
-    box.onclick = (event) => { event.stopPropagation(); toggleSelected(hit.path); };
-    picture.append(box);
-  }
+  if (isWindows && MEDIA.has(hit.kind)) picture.append(checkboxFor(hit));
   if (hit.kind !== "image" && hit.kind !== "screenshot") {
     const badge = element("span", "kind-badge");
     badge.innerHTML = ICONS[hit.kind] || ICONS.doc;
@@ -263,6 +398,20 @@ function cell(hit) {
   item.append(picture, element("div", "name", "‎" + nameOf(hit.path)), folderLine(folderOf(hit)));
   wire(item, hit);
   return item;
+}
+
+/// The tick that chooses a file for Move To, Copy To or Delete, in the grid's corner or the table's first column.
+/// Its press is its own: it neither starts a drag of the file nor takes the keyboard from the field.
+function checkboxFor(hit) {
+  const box = element("button", "checkbox");
+  box.type = "button";
+  box.setAttribute("role", "checkbox");
+  box.setAttribute("aria-checked", String(state.selected.has(hit.path)));
+  box.setAttribute("aria-label", `Select ${nameOf(hit.path)}`);
+  box.innerHTML = ICONS.check;
+  box.onmousedown = (event) => { event.stopPropagation(); event.preventDefault(); };
+  box.onclick = (event) => { event.stopPropagation(); toggleSelected(hit.path); };
+  return box;
 }
 
 /// The picture of a cell: the photo or screenshot, the frame or page that matched (from the helper, once the cell
@@ -450,7 +599,7 @@ function select(path) {
 /// The result the field's arrows are on, for a screen reader. The field keeps the keyboard (as on the Mac), so it names
 /// the chosen option rather than the option taking focus itself.
 function syncActiveDescendant() {
-  const list = $content.querySelector('[role="listbox"]');
+  const list = $content.querySelector('[role="listbox"], [role="grid"]');
   if (!list) {
     $query.removeAttribute("aria-activedescendant");
     $query.removeAttribute("aria-controls");
@@ -458,7 +607,7 @@ function syncActiveDescendant() {
   }
   if (!list.id) list.id = "results";
   $query.setAttribute("aria-controls", list.id);
-  const option = list.querySelector('[role="option"].selected');
+  const option = list.querySelector('[role="option"].selected, [role="row"].selected');
   if (!option) {
     $query.removeAttribute("aria-activedescendant");
     return;
@@ -1178,17 +1327,14 @@ let playing = null;   // the audio of the selected result, while it plays
 function renderSide() {
   stopPlaying();
   const shown = state.hasResults && !state.codePhase && state.query.trim();
-  const chosen = shown && isWindows ? selectedHits() : [];
-  if (chosen.length > 1) {
-    $side.hidden = !state.showsPreview;
-    $side.replaceChildren(summaryOf(chosen));
-    return;
-  }
   const hit = shown ? selectedHit() : null;
   $side.hidden = !state.showsPreview || !hit;
   $side.replaceChildren();
   if (!hit) return;
-  $side.append(previewPicture(hit), facts(hit), why(hit), actions(hit));
+  $side.append(previewPicture(hit), facts(hit));
+  const chosen = shown && isWindows ? selectedHits() : [];
+  if (chosen.length > 1) $side.append(selectionSummary(chosen));
+  $side.append(why(hit), actions(hit));
   fitPreview();
 }
 
@@ -1203,21 +1349,17 @@ function fitPreview() {
 // A taller or shorter window, or the pane hidden and shown again, gives the picture a different room.
 new ResizeObserver(fitPreview).observe($side);
 
-/// Several files chosen: the count and size they add up to, and each one's name and size.
-function summaryOf(hits) {
-  const box = element("div");
-  const head = element("div", "summary");
+/// Several files chosen: under the active one's facts, how many, how much, and of what kinds. The files themselves
+/// are ticked in the results, so the pane keeps showing the one being looked at.
+function selectionSummary(hits) {
+  const box = element("div", "selection-summary");
+  const head = element("div", "selection-head");
   head.append(element("strong", "", `${hits.length} files`), element("span", "", bytes(selectedSize(hits))));
-  const list = element("ul", "summary-list");
-  for (const hit of hits.slice(0, 30)) {
-    const item = element("li");
-    item.title = hit.path;
-    item.append(element("span", "summary-name", nameOf(hit.path)),
-                element("span", "summary-size", bytes(Number(hit.size) || 0)));
-    list.append(item);
-  }
-  if (hits.length > 30) list.append(element("li", "summary-size", `and ${hits.length - 30} more`));
-  box.append(head, list);
+  const counts = new Map();
+  for (const hit of hits) counts.set(hit.kind, (counts.get(hit.kind) || 0) + 1);
+  const kinds = [...counts].sort((a, b) => KIND_ORDER.indexOf(a[0]) - KIND_ORDER.indexOf(b[0]))
+    .map(([kind, count]) => countOf(count, COUNTED[kind]?.[0] || "file"));
+  box.append(head, element("div", "selection-kinds", kinds.join(" · ")));
   return box;
 }
 
@@ -1632,6 +1774,12 @@ $query.addEventListener("input", queryChanged);
 $query.addEventListener("mousedown", () => { state.navigated = false; });
 $("clear").onmousedown = (event) => event.preventDefault();
 $("clear").onclick = () => setQuery("");
+$("toggle-view").onmousedown = (event) => event.preventDefault();
+$("toggle-view").onclick = () => {
+  state.view = state.view === "grid" ? "table" : "grid";
+  updateViewButton();
+  renderContent();
+};
 $("toggle-preview").onmousedown = (event) => event.preventDefault();
 $("toggle-preview").onclick = () => {
   state.showsPreview = !state.showsPreview;
@@ -1661,6 +1809,14 @@ function updatePreviewButton() {
   const button = $("toggle-preview");
   button.setAttribute("aria-pressed", String(state.showsPreview));
   button.title = state.showsPreview ? "Hide Preview" : "Show Preview";
+  button.setAttribute("aria-label", button.title);
+}
+
+function updateViewButton() {
+  const button = $("toggle-view");
+  const table = state.view === "table";
+  button.setAttribute("aria-pressed", String(table));
+  button.title = table ? "Show as Grid" : "Show as Table";
   button.setAttribute("aria-label", button.title);
 }
 

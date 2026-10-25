@@ -231,14 +231,116 @@ svg { display: block; }
 }
 .cell .checkbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* One chosen file in the side panel: how many, how much, and each one's name and size. */
-.summary { display: flex; align-items: baseline; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
-.summary strong { font-size: 14px; }
-.summary span { font-size: 12px; color: var(--secondary); }
-.summary-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
-.summary-list li { display: flex; align-items: baseline; gap: 10px; }
-.summary-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.summary-size { flex: none; color: var(--secondary); font-variant-numeric: tabular-nums; }
+/* The results as a table: headings to sort by, a row for each file, the chosen ones ticked. */
+
+.table-wrap { padding: 0; }
+
+.results-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.results-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--secondary);
+}
+.results-table th.check { width: 30px; }
+.results-table th.size { width: 72px; }
+.results-table th.type { width: 66px; }
+.results-table th.date { width: 94px; }
+.results-table th.properties { width: 126px; }
+
+.results-table th button {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  white-space: nowrap;
+}
+.results-table th.size button { justify-content: flex-end; }
+.results-table th button:hover { color: var(--text); }
+.results-table th button.sorted { color: var(--text); }
+.results-table th .arrow { font-size: 10px; color: var(--accent); }
+.results-table th button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.results-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.results-table tbody tr { cursor: default; }
+.results-table tbody tr:hover { background: var(--fill); }
+.results-table tbody tr.checked { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.results-table tbody tr.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.results-table tbody tr.selected.checked { box-shadow: inset 3px 0 0 var(--amber); }
+.results-table tbody tr.selected:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+
+.results-table td.check { width: 30px; padding: 4px 0; text-align: center; }
+.results-table td.size { text-align: right; font-variant-numeric: tabular-nums; }
+.results-table td.type, .results-table td.date { color: var(--secondary); }
+
+.results-table .table-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.results-table .type-icon { flex: none; width: 16px; height: 16px; color: var(--secondary); }
+.results-table .type-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.results-table .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.results-table .table-name .place { flex: none; margin-left: auto; font-size: 9.5px; }
+
+.results-table .checkbox {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1.5px solid var(--fill-strong);
+  border-radius: 5px;
+  background: transparent;
+  color: white;
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+}
+.results-table .checkbox svg { width: 11px; height: 11px; opacity: 0; }
+.results-table .checkbox[aria-checked="true"] { background: var(--accent); border-color: transparent; }
+.results-table .checkbox[aria-checked="true"] svg { opacity: 1; }
+.results-table .checkbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.results-table tr.weaker-row td { padding: 2px 10px; }
+.results-table tr.weaker-row:hover { background: none; }
+.results-table tr.weaker-row .weaker-toggle { margin: 0; }
+
+/* Several files chosen: under the active one's facts, how many and how much, by kind. */
+.selection-summary {
+  margin-top: 12px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--tile);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.selection-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.selection-head strong { font-size: 12.5px; }
+.selection-head span { font-size: 11px; color: var(--secondary); font-variant-numeric: tabular-nums; }
+.selection-kinds { font-size: 11px; color: var(--secondary); }
 
 .cell .picture img { width: 100%; height: 100%; object-fit: contain; }
 .cell .picture .big-icon svg { width: 46px; height: 46px; fill: none; stroke: var(--ember); stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
