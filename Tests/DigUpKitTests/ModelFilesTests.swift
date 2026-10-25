@@ -2,12 +2,14 @@ import Foundation
 import Testing
 @testable import DigUpKit
 
-@Suite struct ModelFilesTests {
+@Suite final class ModelFilesTests {
     let folder: URL = {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("DigUp-model-files-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
 
     /// A sparse file: its logical size without writing (or allocating) 865 MB.
     func sparse(_ name: String, bytes: Int64) throws -> URL {

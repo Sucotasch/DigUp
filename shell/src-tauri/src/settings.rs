@@ -54,6 +54,8 @@ pub struct Settings {
     pub model_removed: bool,
     /// The old folder after a move: its files go once the new model is ready (retried at the next start on failure).
     pub model_cleanup: Option<String>,
+    /// Where the index lives (Settings → Storage). None: the default folder under the app's data folder.
+    pub index_folder: Option<String>,
 }
 
 /// The window's size inside its frame (logical pixels), where it was (physical; Wayland doesn't tell), and whether it
@@ -95,16 +97,19 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join("settings.json");
         let settings = Settings { models_folder: Some("G:\\Ai\\Модели".into()), models_volume: Some(42),
-                                      model_removed: true, model_cleanup: Some("C:\\old".into()), ..Settings::default() };
+                                      model_removed: true, model_cleanup: Some("C:\\old".into()),
+                                      index_folder: Some("H:\\DigUp\\Index".into()), ..Settings::default() };
         settings.save(&path).unwrap();
         let loaded = Settings::load(&path);
         assert_eq!(loaded.models_folder, settings.models_folder);
         assert_eq!(loaded.models_volume, Some(42));
         assert!(loaded.model_removed);
         assert_eq!(loaded.model_cleanup, settings.model_cleanup);
+        assert_eq!(loaded.index_folder, settings.index_folder);
         std::fs::write(&path, br#"{"setUp":true}"#).unwrap();
         let older = Settings::load(&path);
         assert!(older.models_folder.is_none() && older.models_volume.is_none() && !older.model_removed);
+        assert!(older.index_folder.is_none());
         let _ = std::fs::remove_dir_all(&folder);
     }
 }

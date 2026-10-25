@@ -1,6 +1,7 @@
 //! What the shell is told at launch. The folders and the hotkey come from the command line until onboarding and the
 //! settings window exist.
 
+use crate::settings::Settings;
 use std::path::PathBuf;
 
 /// The panel's hotkey unless told otherwise: ⇧⌘Space on a Mac (the Mac app's), Ctrl+Shift+Space elsewhere.
@@ -115,13 +116,22 @@ impl Options {
 }
 
 impl Options {
-    /// The index folder the helpers use: the one given, else the helper's default (which the watcher must pass over).
-    pub fn index_folder(&self) -> Option<PathBuf> {
-        if self.index.is_some() {
-            return self.index.clone();
+    /// The index folder the helpers use: `--index` in dev runs, else the person's choice, else the helper's default.
+    /// The watcher gets the same path, so it passes over DigUp's own writes.
+    pub fn index_folder(&self, settings: &Settings) -> Option<PathBuf> {
+        if let Some(index) = &self.index {
+            return Some(index.clone());
         }
+        if let Some(chosen) = settings.index_folder.as_deref().map(str::trim).filter(|chosen| !chosen.is_empty()) {
+            return Some(PathBuf::from(chosen));
+        }
+        self.default_index_folder()
+    }
+
+    fn default_index_folder(&self) -> Option<PathBuf> {
         if cfg!(windows) {
-            return std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("DigUp").join("index"));
+            return std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
+                .map(|local| PathBuf::from(local).join("DigUp").join("index"));
         }
         let data = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));

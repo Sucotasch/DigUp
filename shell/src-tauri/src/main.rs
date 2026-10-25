@@ -13,6 +13,7 @@ mod file_ops;
 mod helper;
 mod hotkey;
 mod hours;
+mod index_folder;
 mod models;
 mod moments;
 mod options;
@@ -71,6 +72,10 @@ struct Shell {
     transfer_state: Mutex<Value>,
     /// One model-folder operation at a time (change, import, delete, check).
     models_busy: AtomicBool,
+    /// The index folder is being copied or switched: no helper may open it meanwhile.
+    index_busy: AtomicBool,
+    /// Held while a helper starts and while the index moves, so neither can happen in the middle of the other.
+    index_move: Mutex<()>,
     /// The model for the setup window and the tray: {"state": "checking|downloading|waiting|ready|failed", …}.
     model_state: Mutex<Value>,
     /// What indexing is doing, from the index helper's events (status.rs).
@@ -132,6 +137,11 @@ impl Shell {
 
     fn end_models(&self) {
         self.models_busy.store(false, Ordering::SeqCst);
+    }
+
+    /// The folder with the index now: `--index` in dev runs, the person's choice, or the default.
+    fn index_folder(&self) -> Option<PathBuf> {
+        self.options.index_folder(&self.settings.lock().unwrap())
     }
 
     /// The folders searched: the launch arguments' in dev runs, else the settings'.
@@ -219,7 +229,7 @@ impl Shell {
     fn search_launch(&self) -> Launch {
         let settings = self.settings.lock().unwrap().clone();
         let mut args = vec!["search-service".to_string()];
-        args.extend(self.index_arguments());
+        args.extend(self.index_arguments_for(&settings));
         args.extend(folder_arguments(&settings, &self.code_folders()));
         args.extend(self.folders());
         let mut launch = self.launch(args, "search.log");
@@ -238,7 +248,13 @@ impl Shell {
     }
 
     fn index_arguments(&self) -> Vec<String> {
-        self.options.index.iter().flat_map(|index| ["--index".to_string(), index.display().to_string()]).collect()
+        self.index_arguments_for(&self.settings.lock().unwrap())
+    }
+
+    fn index_arguments_for(&self, settings: &crate::settings::Settings) -> Vec<String> {
+        self.options.index_folder(settings)
+            .map(|index| vec!["--index".to_string(), index.display().to_string()])
+            .unwrap_or_default()
     }
 
     /// `index-service` for the folders as they are now.
@@ -248,7 +264,7 @@ impl Shell {
         if self.prune.swap(false, Ordering::SeqCst) {
             args.push("--prune".into());
         }
-        args.extend(self.index_arguments());
+        args.extend(self.index_arguments_for(&settings));
         args.extend(folder_arguments(&settings, &self.code_folders()));
         args.extend(self.folders());
         let mut launch = self.launch(args, "index.log");
@@ -263,7 +279,7 @@ impl Shell {
 
     /// Where the code index is (deleted when code search is turned off).
     fn code_index_files(&self) -> Vec<PathBuf> {
-        let Some(index) = self.options.index_folder() else { return Vec::new() };
+        let Some(index) = self.index_folder() else { return Vec::new() };
         ["", "-wal", "-shm"].iter().map(|end| index.join(format!("code.sqlite{end}"))).collect()
     }
 
@@ -333,6 +349,9 @@ async fn ask(shell: State<'_, Arc<Shell>>, request: Value) -> Result<Value, Stri
     let op = request.get("op").and_then(Value::as_str).unwrap_or_default();
     if !["search", "embed_ahead", "text", "render", "prewarm", "status", "summaries", "file_op"].contains(&op) {
         return Err(format!("not a question the panel asks: {op}"));
+    }
+    if shell.index_busy.load(Ordering::SeqCst) {
+        return Err("The index is being moved; search works again in a moment.".into());
     }
     shell.search.ask(request).await
 }
@@ -810,7 +829,7 @@ fn main() {
             file_operation, cancel_file_operation, pick_destination_folder,
             pick_model_folder, pick_model_files, model_folder_plan, model_folder_apply, download_model,
             model_check, model_import, delete_model_files, delete_old_model_files, model_manifest,
-            setup_model_download, setup_model_use, setup_model_skip
+            setup_model_download, setup_model_use, setup_model_skip, index_folder_plan, move_index
         ])
         .build(tauri::generate_context!())
         .expect("DigUp couldn't start");
@@ -853,7 +872,9 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         options.code_roots.iter().map(|root| root.display().to_string()).collect()
     };
     let mut search_args = vec!["search-service".to_string()];
-    search_args.extend(options.index.iter().flat_map(|index| ["--index".to_string(), index.display().to_string()]));
+    if let Some(index) = options.index_folder(&settings) {
+        search_args.extend(["--index".to_string(), index.display().to_string()]);
+    }
     search_args.extend(folder_arguments(&settings, &code_folders));
     search_args.extend(roots);
     let search = SearchService::new(
@@ -897,6 +918,8 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         transfer: models::Transfer::default(),
         transfer_state: Mutex::new(json!({"state": "idle"})),
         models_busy: AtomicBool::new(false),
+        index_busy: AtomicBool::new(false),
+        index_move: Mutex::new(()),
         model_state: Mutex::new(json!({"state": "checking"})),
         watcher: Mutex::new(None),
         code_watcher: Mutex::new(None),
@@ -1045,7 +1068,7 @@ fn watch_folders(app: &AppHandle) {
          Some(settings.skip_types.clone()))
     };
     changed(app);
-    let index = shell.options.index_folder();
+    let index = shell.index_folder();
     *shell.watcher.lock().unwrap() = (!folders.is_empty()).then(|| {
         let app = app.clone();
         FolderWatcher::start(&folders, skipped, index.clone(), types, Duration::from_secs(2), Duration::MAX, move |paths| {
@@ -1070,8 +1093,9 @@ fn watch_folders(app: &AppHandle) {
 /// indexing isn't paused or waiting for its hours.
 fn may_index(shell: &Shell) -> bool {
     // Removing the last folder still needs a helper to prune the index, even without a model.
-    (shell.prune.load(Ordering::SeqCst)
-        || ((!shell.folders().is_empty() || !shell.code_folders().is_empty()) && shell.model_ready()))
+    !shell.index_busy.load(Ordering::SeqCst)
+        && (shell.prune.load(Ordering::SeqCst)
+            || ((!shell.folders().is_empty() || !shell.code_folders().is_empty()) && shell.model_ready()))
         && !shell.measuring.load(Ordering::SeqCst) && !shell.quitting.load(Ordering::SeqCst) && {
             let status = shell.status.lock().unwrap();
             !status.paused && status.held_until.is_none()
@@ -1081,6 +1105,7 @@ fn may_index(shell: &Shell) -> bool {
 /// Has the index helper sync and index.
 fn run_index(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>();
+    let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
     if !may_index(&shell) {
         return;
     }
@@ -1093,6 +1118,7 @@ fn run_index(app: &AppHandle) {
 /// walking every chosen folder would take as long as the whole index.
 fn index_changed(app: &AppHandle, paths: &[PathBuf]) {
     let shell = app.state::<Arc<Shell>>();
+    let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
     if !may_index(&shell) {
         return;
     }
@@ -1104,6 +1130,7 @@ fn index_changed(app: &AppHandle, paths: &[PathBuf]) {
 /// Code changed in code search's folders: the code index syncs just those folders.
 fn code_changed(app: &AppHandle, paths: &[PathBuf]) {
     let shell = app.state::<Arc<Shell>>();
+    let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
     if !may_index(&shell) {
         return;
     }
@@ -1449,7 +1476,7 @@ fn settings_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
 /// Where the model and the index are, how big the index is on disk (its database and write-ahead log), and the model
 /// files as they are now.
 fn storage(shell: &Shell) -> Value {
-    let index = shell.options.index_folder();
+    let index = shell.index_folder();
     let size = |name: &str| -> u64 {
         let Some(index) = &index else { return 0 };
         ["", "-wal", "-shm"].iter().filter_map(|end| std::fs::metadata(index.join(format!("{name}{end}"))).ok()).map(|file| file.len()).sum()
@@ -1459,6 +1486,143 @@ fn storage(shell: &Shell) -> Value {
     storage["indexBytes"] = json!(size("index.sqlite"));
     storage["codeBytes"] = json!(size("code.sqlite"));
     storage
+}
+
+// MARK: The index folder
+
+/// What moving the index to `target` would mean (fast): its size, free space, and a reason it can't be used.
+#[tauri::command]
+fn index_folder_plan(shell: State<'_, Arc<Shell>>, target: String) -> Value {
+    let current = shell.index_folder().unwrap_or_default();
+    let target = PathBuf::from(target);
+    if shell.options.index.is_some() {
+        return json!({
+            "kind": "invalid", "current": current.display().to_string(), "target": target.display().to_string(),
+            "bytes": index_folder::bytes(&current), "free": null, "problem": FIXED_INDEX,
+        });
+    }
+    index_folder::plan(&current, &target)
+}
+
+/// A dev or checked run named the index folder on its command line; Settings can't change what that run uses.
+const FIXED_INDEX: &str = "DigUp was started with a fixed index folder (--index). Start it without that argument to move the index.";
+
+/// Settings → Storage → Move Index Folder…: stops the helpers that hold the databases, copies the index to `target`,
+/// checks that it opens, saves the choice, and only then removes the old files. A failure leaves the old index in use.
+#[tauri::command]
+async fn move_index(app: AppHandle, shell: State<'_, Arc<Shell>>, target: String)
+    -> Result<Value, String> {
+    let shell = shell.inner().clone();
+    let target = PathBuf::from(target);
+    tauri::async_runtime::spawn_blocking(move || move_index_folder(&app, &shell, target))
+        .await.map_err(|error| format!("the index move stopped: {error}"))?
+}
+
+fn move_index_folder(app: &AppHandle, shell: &Arc<Shell>, target: PathBuf) -> Result<Value, String> {
+    // The watchers go back up however this ends, after the lock and the busy flag are clear (watch_folders starts
+    // indexing at once, which must see the folder as it is now).
+    struct RestoreWatchers(Option<AppHandle>);
+    impl Drop for RestoreWatchers {
+        fn drop(&mut self) {
+            if let Some(app) = self.0.take() {
+                watch_folders(&app);
+            }
+        }
+    }
+    struct Busy<'a>(&'a AtomicBool);
+    impl Drop for Busy<'_> {
+        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+    }
+
+    let mut restore = RestoreWatchers(None);
+    // A helper start and this move take turns: neither can put a database in the copy's way.
+    let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
+    if shell.index_busy.swap(true, Ordering::SeqCst) {
+        return Err("The index is already being moved.".into());
+    }
+    let _busy = Busy(&shell.index_busy);
+    if shell.measuring.load(Ordering::SeqCst) {
+        return Err("The speed check is running; try again in a few seconds.".into());
+    }
+    if shell.options.index.is_some() {
+        return Err(FIXED_INDEX.into());
+    }
+    let Some(current) = shell.index_folder() else {
+        return Err("There is no index folder to move.".into());
+    };
+    let plan = index_folder::plan(&current, &target);
+    match plan["kind"].as_str().unwrap_or_default() {
+        "same" => return Ok(json!({"target": target.display().to_string(), "same": true, "cleanup": true})),
+        "move" => {}
+        _ => return Err(plan["problem"].as_str().unwrap_or("That folder can't take the index.").to_string()),
+    }
+
+    // The databases have to be closed before they are copied; the watchers mustn't ask for a sync meanwhile.
+    *shell.watcher.lock().unwrap() = None;
+    *shell.code_watcher.lock().unwrap() = None;
+    restore.0 = Some(app.clone());
+    shell.index.stop();
+    shell.search.stop();
+    let had_index = !index_folder::data_files(&current).is_empty();
+    let copied = index_folder::copy_to(&current, &target)?;
+    if had_index {
+        if let Err(error) = index_opens(shell, &target) {
+            let _ = index_folder::cleanup(&target);
+            return Err(format!("The copied index couldn't be opened: {error}"));
+        }
+    }
+    let saved = {
+        let mut settings = shell.settings.lock().unwrap();
+        let previous = settings.index_folder.clone();
+        settings.index_folder = Some(target.display().to_string());
+        let saved = settings.save(&shell.settings_path);
+        if saved.is_err() {
+            settings.index_folder = previous;   // still the old folder: don't point this run at an empty one
+        }
+        saved
+    };
+    if let Err(error) = saved {
+        let _ = index_folder::cleanup(&target);
+        return Err(format!("can't save the index folder: {error}"));
+    }
+    shell.search.set_launch(shell.search_launch());
+    let left = index_folder::cleanup(&current);
+    Ok(json!({
+        "target": target.display().to_string(), "bytes": copied, "cleanup": left.is_empty(),
+        "left": left.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+    }))
+}
+
+/// Opens the copied databases with `digup status` before they become the ones in use (the code index too, when it
+/// was copied).
+fn index_opens(shell: &Arc<Shell>, folder: &Path) -> Result<(), String> {
+    let mut checks = vec![false];
+    if folder.join("code.sqlite").is_file() {
+        checks.push(true);
+    }
+    for code in checks {
+        let mut command = std::process::Command::new(&shell.options.helper);
+        command.args(["status".to_string(), "--index".to_string(), folder.display().to_string()]);
+        if code {
+            command.arg("--code");
+        }
+        command.envs(shell.helper_env());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let output = command.output().map_err(|error| format!("can't run the helper: {error}"))?;
+        if output.status.success() {
+            continue;
+        }
+        let (stderr, stdout) = (String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+        let message = stderr.lines().chain(stdout.lines())
+            .find(|line| !line.trim().is_empty()).unwrap_or("the index didn't open");
+        let which = if code { "code index" } else { "index" };
+        return Err(format!("{which}: {message}"));
+    }
+    Ok(())
 }
 
 // MARK: The model folder

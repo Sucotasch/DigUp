@@ -27,6 +27,10 @@ let removingCode = null;     // the code folder whose removal is being confirmed
 let modelMessage = "";      // what the last model action said ("2 of 2 files verified", a failure)
 let modelProblem = false;    // …and whether it was a failure
 let modelConfirm = null;     // { run, alternate } for the model question on screen
+let indexMessage = "";      // what the last index move said
+let indexProblem = false;    // …and whether it was a failure
+let indexBusy = false;       // the index is being copied to its new folder
+let indexConfirm = null;     // the move waiting on its question
 
 // MARK: Tabs
 
@@ -473,6 +477,10 @@ function renderStorage() {
   $("model-note").className = "note" + (problem ? " problem" : "");
   $("index-size").textContent = bytes(storage.indexBytes || 0) + (storage.codeBytes ? ` (code ${bytes(storage.codeBytes)})` : "");
   pathButton($("index-path"), storage.index);
+  $("index-change").disabled = indexBusy || measuring;
+  $("index-note").hidden = !indexMessage;
+  $("index-note").textContent = indexMessage;
+  $("index-note").className = "note" + (indexProblem ? " problem" : "");
   $("version").textContent = `DigUp ${info.version || ""} · EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).`;
   $("licenses").hidden = !info.licenses;
 }
@@ -665,6 +673,79 @@ async function copyModelLinks() {
     modelNote(String(error), true);
   }
 }
+
+// MARK: Index actions
+
+function indexNote(text, problem = false) {
+  indexMessage = text || "";
+  indexProblem = problem;
+  renderStorage();
+}
+
+function askIndex(text, run) {
+  indexConfirm = run;
+  $("index-confirm-text").textContent = text;
+  $("index-confirm-go").textContent = "Move Index";
+  $("index-confirm").hidden = false;
+}
+
+function closeIndexConfirm() {
+  indexConfirm = null;
+  $("index-confirm").hidden = true;
+}
+
+async function changeIndexFolder() {
+  try {
+    const picked = await invoke("pick_destination_folder", { title: "Move the Index to…" });
+    if (!picked) return;
+    const plan = await invoke("index_folder_plan", { target: picked });
+    if (plan.kind === "same") {
+      indexNote("The index is already in this folder.");
+      return;
+    }
+    if (plan.kind !== "move") {
+      indexNote(plan.problem || "That folder can't take the index.", true);
+      return;
+    }
+    askIndex(`Move the index (${bytes(plan.bytes || 0)}) to ${shown(plan.target)}?\n\nIndexing pauses while the files are
+      copied. They are checked before DigUp switches; the old files are removed only after that.`,
+             () => moveIndex(plan.target));
+  } catch (error) {
+    indexNote(String(error), true);
+  }
+}
+
+async function moveIndex(target) {
+  indexBusy = true;
+  indexMessage = "Moving the index…";
+  indexProblem = false;
+  renderStorage();
+  try {
+    const result = await invoke("move_index", { target });
+    if (result.cleanup === false) {
+      indexMessage = `The index is now in ${shown(result.target)}, but the old files couldn't be removed: `
+        + (result.left || []).join(", ");
+      indexProblem = true;
+    } else {
+      indexMessage = `The index is now in ${shown(result.target)}.`;
+    }
+  } catch (error) {
+    indexMessage = String(error);
+    indexProblem = true;
+  } finally {
+    indexBusy = false;
+  }
+  await refresh().catch(() => {});
+  renderStorage();
+}
+
+$("index-change").onclick = () => changeIndexFolder();
+$("index-confirm-cancel").onclick = () => closeIndexConfirm();
+$("index-confirm-go").onclick = () => {
+  const run = indexConfirm;
+  closeIndexConfirm();
+  run?.();
+};
 
 /// A folder's path; a click shows it in the file manager.
 function pathButton(button, path) {

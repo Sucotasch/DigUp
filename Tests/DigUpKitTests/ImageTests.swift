@@ -10,13 +10,15 @@ import ImageIO
 /// 400×240 pattern of four colored quadrants (red, green above blue, yellow) with a DateTimeOriginal, stored turned
 /// (orientation 6) except the AVIF. ImageIO reads them on macOS, stb or ffmpeg elsewhere: each must hand the model the
 /// picture as it's shown, and the date.
-@Suite struct ImageTests {
+@Suite final class ImageTests {
     static let pictures = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Pictures")
     let folder: URL = {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("DigUpTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
 
     @Test(arguments: ["pattern-o6.jpg", "pattern-o6.heic", "pattern-o6.webp", "pattern-o6.tiff", "pattern.avif"])
     func preparedAsShown(_ name: String) throws {

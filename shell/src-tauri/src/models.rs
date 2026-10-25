@@ -481,12 +481,34 @@ pub fn info(shell: &crate::Shell) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Deref;
 
-    fn folder(name: &str) -> PathBuf {
+    /// A test folder that goes away with the test, even when an assertion fails (the model-sized files inside it are
+    /// real disk space on Windows).
+    struct TempFolder(PathBuf);
+
+    impl Deref for TempFolder {
+        type Target = Path;
+        fn deref(&self) -> &Path { &self.0 }
+    }
+
+    impl AsRef<Path> for TempFolder {
+        fn as_ref(&self) -> &Path { &self.0 }
+    }
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    impl TempFolder {
+        fn path(&self) -> PathBuf { self.0.clone() }
+    }
+
+    fn folder(name: &str) -> TempFolder {
         let folder = std::env::temp_dir().join(format!("DigUp-models-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).unwrap();
-        folder
+        TempFolder(folder)
     }
 
     fn sparse(folder: &Path, name: &str, bytes: u64) -> PathBuf {
@@ -501,18 +523,20 @@ mod tests {
         let legacy = folder("legacy");
         let fresh = folder("fresh");
         let chosen = folder("chosen");
-        assert_eq!(resolve(None, None, &legacy, &fresh), fresh);
+        assert_eq!(resolve(None, None, &legacy, &fresh), fresh.path());
         sparse(&legacy, MODEL_FILES[0], 10);
-        assert_eq!(resolve(None, None, &legacy, &fresh), legacy, "one file keeps the old folder (both stay together)");
-        assert_eq!(resolve(None, Some(&chosen.display().to_string()), &legacy, &fresh), chosen);
-        assert_eq!(resolve(Some(&fresh), Some(&chosen.display().to_string()), &legacy, &fresh), fresh);
-        assert_eq!(resolve(None, Some("  "), &legacy, &fresh), legacy);
+        assert_eq!(resolve(None, None, &legacy, &fresh), legacy.path(),
+                   "one file keeps the old folder (both stay together)");
+        assert_eq!(resolve(None, Some(&chosen.display().to_string()), &legacy, &fresh), chosen.path());
+        assert_eq!(resolve(Some(&fresh), Some(&chosen.display().to_string()), &legacy, &fresh), fresh.path());
+        assert_eq!(resolve(None, Some("  "), &legacy, &fresh), legacy.path());
     }
 
     #[test]
     fn a_path_with_spaces_and_cyrillic_is_kept_as_chosen() {
         let chosen = folder("Мои модели — 2026");
-        assert_eq!(resolve(None, Some(&chosen.display().to_string()), Path::new("C:/old"), Path::new("C:/new")), chosen);
+        assert_eq!(resolve(None, Some(&chosen.display().to_string()), Path::new("C:/old"), Path::new("C:/new")),
+                   chosen.path());
     }
 
     #[test]
@@ -568,7 +592,8 @@ mod tests {
         assert_eq!(chosen_folder(&profile), profile, "a folder already named after the model stays as it is");
         std::fs::create_dir_all(&container).unwrap();
         sparse(&container, MODEL_FILES[0], 1);
-        assert_eq!(chosen_folder(&container), container, "a folder holding a model file is used in place");
+        assert_eq!(chosen_folder(&container), container.path(),
+                   "a folder holding a model file is used in place");
     }
 
     #[test]

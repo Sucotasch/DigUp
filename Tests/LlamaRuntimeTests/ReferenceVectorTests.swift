@@ -77,7 +77,10 @@ import Testing
     static func vectors() throws -> [String: [Float]] {
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("digup-reference-vectors.log")
         let embedder = try LlamaEmbedder(models: LlamaModels.locate(), textOnly: false, log: log)
-        defer { embedder.close() }
+        defer {
+            embedder.close()
+            try? FileManager.default.removeItem(at: log)
+        }
         var made: [String: [Float]] = [:]
         for (input, vector) in zip(texts, try embedder.embedTexts(texts.map(\.text))) { made[input.name] = vector }
         for (name, file, budget) in images {

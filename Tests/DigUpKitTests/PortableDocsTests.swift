@@ -5,12 +5,14 @@ import Foundation
 import Testing
 @testable import DigUpKit
 
-@Suite struct PortableDocsTests {
+@Suite final class PortableDocsTests {
     let folder: URL = {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("DigUp-PortableDocs-\(UUID().uuidString)")
         try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
 
     /// A zip with one deflated entry, as Word and LibreOffice write theirs.
     private func zip(named file: String, entry: String, _ bytes: [UInt8]) throws -> URL {

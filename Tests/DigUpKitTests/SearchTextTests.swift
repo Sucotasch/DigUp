@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import DigUpKit
 
-@Suite struct SearchTextTests {
+@Suite final class SearchTextTests {
     @Test func stubsHaveWordsButNoProse() {
         for stub in ["DEBUG=true", "root = true", "#separator:pipe", "id,name,value", "User-agent: *", "# Ignore logs\n*.log"] {
             #expect(SearchText.hasWords(stub), "\(stub)")
@@ -18,6 +18,8 @@ import Testing
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
 
     @Test func normalizedFoldsWhatIsTypedDifferently() {
         #expect(SearchText.normalized("الْمَكْتَبَةَ") == "المكتبة")              // harakat

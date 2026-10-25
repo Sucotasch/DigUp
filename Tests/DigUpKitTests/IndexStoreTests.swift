@@ -8,12 +8,14 @@ import Testing
 import WinSDK
 #endif
 
-@Suite struct IndexStoreTests {
+@Suite final class IndexStoreTests {
     let folder: URL = {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("DigUpTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
 
     func file(_ path: String, inode: UInt64) -> Candidate {
         Candidate(path: path, kind: .image, size: 10, mtime: 1, inode: inode, device: 1)
