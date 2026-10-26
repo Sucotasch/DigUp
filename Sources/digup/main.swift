@@ -14,7 +14,7 @@ let usage = """
       digup estimate <folder>... [--json]     what would be indexed, and how long the first pass takes
       digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, then the rest
                                               of long PDFs and documents
-      digup search <words>... [--kind K,K] [-n 10] [--json]
+      digup search <words>... [--kind K,K] [-n 10] [--offset N] [--json]
                                               "code: <words>" searches the code index
       digup status                            what's in the index
       digup speed [--model [--if-needed] [--when-quiet S] [--tries N]] [--json]
@@ -67,7 +67,7 @@ struct Arguments {
     var values: [String: String] = [:]
     var lists: [String: [String]] = [:]
     var flags: Set<String> = []
-    static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
+    static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--offset", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude"]
@@ -412,9 +412,11 @@ func search(_ args: Arguments) throws {
     let vector = try queryVectors([query], store: store, searcher: searcher,
                                   prompt: code == nil ? Prompts.query : Prompts.codeQuery)?.first
     let encoded = Date()
-    let hits = try searcher.search(query, queryVector: vector, kinds: try args.kinds(),
-                                   limit: args.values["-n"].flatMap(Int.init) ?? 10, zGate: args.zGate,
-                                   wordWeight: args.wordWeight)
+    let page = try searcher.page(query, queryVector: vector, kinds: try args.kinds(),
+                                 limit: args.values["-n"].flatMap(Int.init) ?? 10,
+                                 offset: args.values["--offset"].flatMap(Int.init) ?? 0, zGate: args.zGate,
+                                 wordWeight: args.wordWeight)
+    let hits = page.hits
     let searched = Date()
     if args.flags.contains("--json") {
         let rows = hits.map(hitFields)
@@ -432,8 +434,9 @@ func search(_ args: Arguments) throws {
         print("      \(tilde((hit.path as NSString).deletingLastPathComponent))")
         if let excerpt = hit.excerpt, !excerpt.isEmpty { print("      “\(excerpt.prefix(160))”") }
     }
-    print(String(format: "(%d vectors · query encoder %.2f s incl. start-up · search %.0f ms)", searcher.vectorCount,
-                 encoded.timeIntervalSince(started), searched.timeIntervalSince(encoded) * 1000))
+    print(String(format: "(%d vectors · %d matches · query encoder %.2f s incl. start-up · search %.0f ms)",
+                 searcher.vectorCount, page.total, encoded.timeIntervalSince(started),
+                 searched.timeIntervalSince(encoded) * 1000))
 }
 
 func status(_ args: Arguments) throws {

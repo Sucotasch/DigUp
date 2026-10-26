@@ -6,11 +6,14 @@ import Foundation
 /// in the Mac app (tens of milliseconds), not a process start.
 ///
 /// Protocol: one JSON request per line on stdin, one JSON response per line on stdout, carrying the request's `id`.
-///   {"op":"search","q":…,"code":bool,"kinds":[…],"limit":n,"meaning":bool,"prefix_last":bool}
-///       → {"hits":[…], "strong":n, "meaning":bool, "ms":{"embed":…,"search":…}}
-///         `meaning` false: keyword-only (while typing, or while the encoder isn't ready); `strong`: the weaker-matches
-///         fold (`Searcher.strongCount`); each hit has the fields of `digup search --json` plus segment_id, modified,
-///         size and info.
+///   {"op":"search","q":…,"code":bool,"kinds":[…],"limit":n,"offset":n,"meaning":bool,"prefix_last":bool}
+///       → {"hits":[…], "strong":n, "total":n, "strong_total":n, "offset":n, "consumed":n, "next_offset":n,
+///          "generation":n, "meaning":bool, "ms":{"embed":…,"search":…}}
+///         `meaning` false: keyword-only (while typing, or while the encoder isn't ready); `strong`: the strong results
+///         in this page (`Searcher.strongCount`, against the whole query's top); `total`/`strong_total`: the whole
+///         ranking; `next_offset` moves by `consumed` ranked files, not by `hits.count` (the shell filters some out);
+///         `generation` changes when the index is reloaded. Each hit has the fields of `digup search --json` plus
+///         segment_id, modified, size and info.
 ///   {"op":"embed_ahead","q":…,"code":bool}   → {"ok":true}: embeds and caches the text (the panel sends what's typed so
 ///                                               far on every keystroke, so the pause's vector is usually ready)
 ///   {"op":"text","segment":id,"code":bool}    → {"text":…}: the part of a file a hit points at, for the preview
@@ -54,6 +57,8 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
     private var vectorCache: [String: [Float]] = [:]
     private var lastQuery = Date()
     private var warnedAboutSource = false
+    /// Bumped whenever the index is opened again; a page from before a reload must not be mixed with later ones.
+    private var generation = 0
     private let lock = NSLock()
     private let output = NSLock()
     /// Renders for previews: two at a time, beside the request loop, each made once per file version.
@@ -85,8 +90,9 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
     private func openCode() throws {
         guard !codeRoots.isEmpty else { return }
         let store = try IndexStore(directory: directory, file: IndexStore.codeFile)
+        let searcher = try Searcher(store: store, loadVectors: false)
         codeStore = store
-        codeSearcher = try Searcher(store: store, loadVectors: false)
+        codeSearcher = searcher
     }
 
     func serve() -> Int32 {
@@ -135,6 +141,7 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             let code = request["code"] as? Bool ?? false
             let kinds = (request["kinds"] as? [String]).map { Set($0.compactMap(FileKind.init(rawValue:))) }
             let limit = request["limit"] as? Int ?? 40
+            let offset = request["offset"] as? Int ?? 0
             let wantMeaning = request["meaning"] as? Bool ?? true
             let prefixLast = request["prefix_last"] as? Bool ?? false
             let started = Date()
@@ -153,23 +160,32 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
                 }
             }
             let embedded = Date()
-            let hits: [SearchHit]
+            let page: SearchPage
             if code {
-                guard let codeSearcher else { return ["hits": [], "strong": 0, "meaning": false] }
-                hits = try codeSearcher.search(text, queryVector: vector, limit: limit, prefixLast: prefixLast).filter {
-                    FolderSelection.isSearched($0.path, folders: codeRoots, skipped: codeSkipped)
+                guard let codeSearcher else {
+                    return ["hits": [], "strong": 0, "total": 0, "strong_total": 0, "offset": 0, "consumed": 0,
+                            "next_offset": 0, "generation": generation, "meaning": false]
+                }
+                page = try codeSearcher.page(text, queryVector: vector, limit: limit, offset: offset,
+                                             prefixLast: prefixLast)
+            } else {
+                page = try searcher.page(text, queryVector: vector, kinds: kinds, limit: limit, offset: offset,
+                                         prefixLast: prefixLast)
+            }
+            let hits = page.hits.filter {
+                if code {
+                    return FolderSelection.isSearched($0.path, folders: codeRoots, skipped: codeSkipped)
                         && FileManager.default.fileExists(atPath: $0.path)
                 }
-            } else {
-                hits = try searcher.search(text, queryVector: vector, kinds: kinds, limit: limit, prefixLast: prefixLast)
-                    .filter {
-                        FolderSelection.isSearched($0.path, folders: roots, skipped: skipped)
-                            && !types.contains(($0.path as NSString).pathExtension.lowercased())
-                            && FileManager.default.fileExists(atPath: $0.path)
-                    }
+                return FolderSelection.isSearched($0.path, folders: roots, skipped: skipped)
+                    && !types.contains(($0.path as NSString).pathExtension.lowercased())
+                    && FileManager.default.fileExists(atPath: $0.path)
             }
             var reply: [String: Any] = [
-                "hits": hits.map(hitFields), "strong": Searcher.strongCount(hits), "meaning": vector != nil,
+                "hits": hits.map(hitFields), "strong": strongCount(hits, top: page.topScore), "total": page.total,
+                "strong_total": page.strong, "offset": page.offset, "consumed": page.consumed,
+                "next_offset": min(page.offset + page.consumed, page.total), "generation": generation,
+                "meaning": vector != nil,
                 "ms": ["embed": Int(embedded.timeIntervalSince(started) * 1000),
                        "search": Int(Date().timeIntervalSince(embedded) * 1000)],
             ]
@@ -281,15 +297,30 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
         }
     }
 
+    /// Strong results in one page, measured against the whole query's top score: a later page must not make its own
+    /// first hit the yardstick.
+    private func strongCount(_ hits: [SearchHit], top: Double) -> Int {
+        guard top > 0 else { return hits.count }
+        return hits.prefix { $0.score >= top * 0.5 }.count
+    }
+
     /// Opens the index again, with the vectors if they were loaded: after indexing or a `file_op` changed it.
     private func reload() throws {
         let hadVectors = searcher.vectorsLoaded
-        searcher = try Searcher(store: store, loadVectors: hadVectors)
+        let hadCodeVectors = codeSearcher?.vectorsLoaded ?? false
+        // Open both before replacing either, and bump the generation only once the new index is really in use:
+        // a failed reload must leave the old one (and its generation) untouched.
+        let newSearcher = try Searcher(store: store, loadVectors: hadVectors)
+        var newCodeSearcher: Searcher?
         if let codeStore {
-            codeSearcher = try Searcher(store: codeStore, loadVectors: codeSearcher?.vectorsLoaded ?? false)
+            newCodeSearcher = try Searcher(store: codeStore, loadVectors: hadCodeVectors)
         } else {
             try openCode()
+            newCodeSearcher = codeSearcher
         }
+        searcher = newSearcher
+        codeSearcher = newCodeSearcher
+        generation += 1
     }
 
     /// Whether the crawl of one of the chosen folders reaches a moved file's new folder. `Rules.isWalked`, not just

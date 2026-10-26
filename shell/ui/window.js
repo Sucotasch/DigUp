@@ -6,7 +6,9 @@
 "use strict";
 
 const TYPING_PAUSE = 120;   // ms after the last keystroke until the search runs (the query was embedded meanwhile)
-const LIMIT = 120;
+const LIMIT = 120;          // the first page, as before: the window opens on the best results at once
+const PAGE_SIZE = 300;      // later pages: measured at ~13–18 ms of DOM each
+const MORE_MARGIN = 400;    // px from the end of the list that asks for the next page
 const FILTERS = [
   { key: "screenshots", title: "Screenshots", kinds: ["screenshot"], icon: "screenshot" },
   { key: "images", title: "Images", kinds: ["image"], icon: "image" },
@@ -43,7 +45,7 @@ const $ = (id) => document.getElementById(id);
 const $query = $("query"), $content = $("content"), $side = $("side"), $kinds = $("kinds"), $menu = $("menu");
 const $batch = $("batch"), $batchSummary = $("batch-summary"), $batchToggle = $("batch-toggle");
 const $modal = $("modal"), $report = $("report");
-const $announce = $("announce");
+const $announce = $("announce"), $more = $("more-results"), $moreCount = $("more-count");
 
 const state = {
   query: "",
@@ -54,6 +56,12 @@ const state = {
   counts: {},           // strong results of each filter for the query, whatever the filter (the chips' numbers)
   meaning: true,        // the results matched by meaning too (false: words only)
   hasResults: false,    // the results of the query in the field are in
+  total: 0,             // files in the whole ranking (the engine's total; the helper may filter a few)
+  strongTotal: 0,       // of those, the strong ones, over the whole ranking
+  nextOffset: 0,        // where the next page starts in the ranking; moves by the helper's `consumed`
+  matchesGeneration: null,   // the helper's index generation this list came from
+  loadingMore: false,
+  pageError: null,      // the last page's error, beside the button; the loaded results stay
   codePhase: null,      // "hint": "code:" alone; "off": no code folders
   selection: null,      // a result's path
   selected: new Set(),  // the files chosen for Move To, Copy To or Delete (their paths; media only)
@@ -91,20 +99,27 @@ function run() {
   state.navigated = false;
   state.error = null;
   state.note = null;       // a search's count is what matters now, not the last operation's line; its report stays
+  state.loadingMore = false;
+  state.pageError = null;
   clearSelection(false);   // a new query or filter starts with nothing chosen
   const typed = state.query.trim();
   const code = isCode();
   const text = /^code:/i.test(typed) ? typed.slice(5).trim() : typed;
   state.codePhase = null;
   if (!typed || (code && (!state.info.hasCode || !text))) {
-    Object.assign(state, { ranked: [], weaker: [], counts: {}, hasResults: false, selection: null });
+    Object.assign(state, { ranked: [], weaker: [], counts: {}, hasResults: false, selection: null,
+                           total: 0, strongTotal: 0, nextOffset: 0, matchesGeneration: null,
+                           loadingMore: false, pageError: null });
     if (typed) state.codePhase = state.info.hasCode ? "hint" : "off";
     render();
     return;
   }
+  // A stale page from an earlier query must never be asked for: reset the paging while the old results stay on screen.
+  Object.assign(state, { total: 0, strongTotal: 0, nextOffset: 0, matchesGeneration: null });
   ask({ op: "embed_ahead", q: text, code }).catch(() => {});
   // Results of an earlier query stay until these are in; with none to show, a spinner.
   renderBar();
+  renderPagination();
   if (!state.hasResults) renderContent();
   const filter = state.filter === "media" ? MEDIA_FILTER : FILTERS.find((item) => item.key === state.filter);
   state.timer = setTimeout(async () => {
@@ -116,7 +131,11 @@ function run() {
       const strong = all.hits.slice(0, all.strong);   // whatever the filter: the chips count all of them
       Object.assign(state, { counts: countsOf(strong), strong, text, meaning: shown.meaning, hasResults: true,
                              showWeaker: false, ranked: shown.hits.slice(0, shown.strong),
-                             weaker: shown.hits.slice(shown.strong) });
+                             weaker: shown.hits.slice(shown.strong),
+                             total: shown.total ?? shown.hits.length,
+                             strongTotal: shown.strong_total ?? shown.strong,
+                             nextOffset: shown.next_offset ?? shown.hits.length,
+                             matchesGeneration: shown.generation ?? null, loadingMore: false, pageError: null });
       if (!rows().some((hit) => hit.path === state.selection)) state.selection = rows()[0]?.path ?? null;
       render();
       if (debugPending) report();
@@ -126,6 +145,253 @@ function run() {
       renderStatus();
     }
   }, TYPING_PAUSE);
+}
+
+/// The filter whose `kinds` the list is showing (the same one `run` sends), or nil for all files/code.
+function pageFilter() {
+  if (isCode()) return null;
+  return state.filter === "media" ? MEDIA_FILTER : FILTERS.find((item) => item.key === state.filter) ?? null;
+}
+
+function remainingResults() {
+  return Math.max(0, state.total - state.nextOffset);
+}
+
+function remainingStrong() {
+  return Math.max(0, state.strongTotal - state.nextOffset);
+}
+
+/// The footer's page control: shown only while there is something to fetch, and never says "300 more" when fewer
+/// than 300 remain. `weaker` results are fetched only after the strong ones, by the button or by unfolding them.
+function renderPagination() {
+  const active = state.hasResults && state.query.trim() && !state.error;
+  const remaining = active ? remainingResults() : 0;
+  const strongRemaining = active ? remainingStrong() : 0;
+  const total = state.total;
+  if (!active || (!remaining && !(total > LIMIT && state.nextOffset >= total))) {
+    $more.hidden = true;
+    $moreCount.hidden = true;
+    $more.textContent = "";
+    $moreCount.textContent = "";
+    return;
+  }
+  if (!remaining) {
+    $more.hidden = true;
+    $more.textContent = "";
+    $moreCount.hidden = false;
+    $moreCount.textContent = `All ${total.toLocaleString()} results shown`;
+    return;
+  }
+  const inStrong = strongRemaining > 0;
+  const size = Math.min(PAGE_SIZE, inStrong ? strongRemaining : remaining);
+  $more.hidden = false;
+  $more.disabled = state.loadingMore;
+  $more.textContent = state.loadingMore ? "Loading…"
+    : state.pageError ? "Retry"
+    : inStrong ? `Show ${size.toLocaleString()} more`
+    : `Show ${size.toLocaleString()} weaker ${size === 1 ? "result" : "results"}`;
+  $moreCount.hidden = false;
+  $moreCount.textContent = state.pageError ? "Couldn't load more results"
+    : `There ${remaining === 1 ? "is" : "are"} ${remaining.toLocaleString()} more ${remaining === 1 ? "result" : "results"}`;
+}
+
+/// Asks for the next page. A scroll near the end asks only while strong results remain; the button also opens the
+/// weaker tail, so a click never loads rows the user cannot see.
+function loadMore(auto = false) {
+  if (state.loadingMore || !state.hasResults || !state.query.trim()) return;
+  const strongRemaining = remainingStrong();
+  const remaining = remainingResults();
+  if (remaining <= 0) return;
+  if (auto && strongRemaining <= 0) return;
+  const inStrong = strongRemaining > 0;
+  const limit = Math.min(PAGE_SIZE, inStrong ? strongRemaining : remaining);
+  if (limit <= 0) return;
+  const generation = state.generation;
+  const text = state.text;
+  const code = isCode();
+  const filter = pageFilter();
+  const offset = state.nextOffset;
+  state.loadingMore = true;
+  state.pageError = null;
+  renderPagination();
+  // The same mode the first page was ranked in: if the encoder wasn't ready then, later pages must not suddenly
+  // switch to meaning and mix two different rankings.
+  ask({ op: "search", q: text, code, meaning: state.meaning, limit, offset,
+        ...(filter && !code ? { kinds: filter.kinds } : {}) })
+    .then((reply) => {
+      if (generation !== state.generation) return;
+      if (state.matchesGeneration != null && reply.generation != null
+          && reply.generation !== state.matchesGeneration) {
+        // The index changed under the list: mixing two rankings would skip or repeat files.
+        run();
+        return;
+      }
+      if (reply.meaning != null && reply.meaning !== state.meaning) {
+        // The encoder stopped (or came back) between pages: a keyword page and a meaning page are different rankings.
+        run();
+        return;
+      }
+      const seen = new Set([...state.ranked, ...state.weaker].map((hit) => hit.path));
+      const hits = reply.hits || [];
+      const pageStrong = hits.slice(0, reply.strong ?? 0).filter((hit) => !seen.has(hit.path));
+      const pageWeak = hits.slice(reply.strong ?? 0).filter((hit) => !seen.has(hit.path));
+      if (!filter) {   // the chips' counts can grow as their pages arrive; a filtered page is only a subset
+        state.strong.push(...pageStrong);
+        state.counts = countsOf(state.strong);
+      }
+      state.ranked.push(...pageStrong);
+      state.weaker.push(...pageWeak);
+      state.total = reply.total ?? state.total;
+      state.strongTotal = reply.strong_total ?? state.strongTotal;
+      state.nextOffset = reply.next_offset ?? (offset + (reply.consumed ?? hits.length));
+      state.matchesGeneration = reply.generation ?? state.matchesGeneration;
+      if (!inStrong && !state.showWeaker) state.showWeaker = true;
+      // Every page is inserted into the list it belongs to, sorted or not, so a page never redraws everything loaded
+      // before it. The first weaker page adds the fold itself if the list doesn't have one yet.
+      const needsRebuild = !appendHits(pageStrong, pageWeak);
+      if (needsRebuild) {
+        const scroll = $content.scrollTop;
+        renderContent();
+        $content.scrollTop = scroll;
+      } else if (pageWeak.length) {
+        updateWeakerToggle();
+      }
+      if (!rows().some((hit) => hit.path === state.selection)) state.selection = rows()[0]?.path ?? null;
+      renderBar();
+      renderSide();
+      renderStatus();
+      renderBatch();
+      renderPagination();
+      syncActiveDescendant();
+      if (debugPending) report();
+      // A page can be short after the helper filters moved files: keep filling the viewport while it is still near the
+      // end. `nextOffset` moving is the guard against asking for the same page forever.
+      if (auto && state.nextOffset > offset) setTimeout(maybeLoadMore, 0);
+    })
+    .catch((error) => {
+      if (generation !== state.generation) return;
+      state.pageError = String(error);
+    })
+    .finally(() => {
+      if (generation === state.generation) {
+        state.loadingMore = false;
+        renderPagination();
+        renderStatus();
+      }
+    });
+}
+
+/// Appends a page without rebuilding the list: `renderContent()` on every page would be quadratic (10k hits took
+/// 479 ms to draw at once, while 300 appended cells take ~13–18 ms). Returns false when the current DOM has no place
+/// for this page, in which case the caller rebuilds.
+function appendHits(strongHits, weakHits) {
+  if (isCode()) {
+    const box = $content.querySelector(".code-list");
+    if (!box) return false;
+    let toggle = box.querySelector(".weaker-toggle");
+    for (const hit of strongHits) box.insertBefore(codeRow(hit), toggle ?? null);
+    if (weakHits.length) {
+      if (!toggle) { toggle = weakerToggle(); box.append(toggle); }
+      if (state.showWeaker) {
+        // A fold opened for the first time shows the weaker rows the first page had put there as well, not only
+        // the ones this page brought.
+        const weak = box.querySelector(".weaker-results") ? weakHits : state.weaker;
+        for (const hit of weak) box.append(codeRow(hit, true));
+      }
+    }
+    return true;
+  }
+  if (state.view === "table") {
+    const body = $content.querySelector("tbody");
+    if (!body) return false;
+    let weakerRow = body.querySelector(".weaker-row");
+    const freshWeak = !weakerRow || !weakerRow.nextElementSibling;
+    if (weakHits.length && !weakerRow) {
+      weakerRow = weakerTableRow();
+      body.append(weakerRow);
+    }
+    if (!state.sort) {
+      for (const hit of strongHits) {
+        const row = tableRow(hit);
+        if (weakerRow) body.insertBefore(row, weakerRow); else body.append(row);
+      }
+      // A fold opened for the first time shows the weaker rows the first page had put there as well.
+      const weak = freshWeak ? state.weaker : weakHits;
+      if (weak.length && state.showWeaker) for (const hit of weak) body.append(tableRow(hit));
+      return true;
+    }
+    // Sorted: insert each row where it belongs between the rows already there, instead of redrawing the whole table
+    // (a page at 10k rows would otherwise cost the sort and the DOM of all of them).
+    const byPath = new Map([...state.ranked, ...state.weaker].map((hit) => [hit.path, hit]));
+    const strongRows = [];
+    for (let node = body.firstElementChild; node && node !== weakerRow; node = node.nextElementSibling) {
+      if (node.classList.contains("result-row")) strongRows.push(node);
+    }
+    const weakRows = [];
+    if (weakerRow) {
+      for (let node = weakerRow.nextElementSibling; node; node = node.nextElementSibling) {
+        if (node.classList.contains("result-row")) weakRows.push(node);
+      }
+    }
+    const insert = (rows, hit, row, before) => {
+      let low = 0, high = rows.length;
+      while (low < high) {
+        const mid = (low + high) >> 1;
+        const other = byPath.get(rows[mid].dataset.path);
+        if (!other || compareHits(other, hit) <= 0) low = mid + 1; else high = mid;
+      }
+      body.insertBefore(row, rows[low] ?? before ?? null);
+      rows.splice(low, 0, row);
+    };
+    for (const hit of sortedHits(strongHits)) insert(strongRows, hit, tableRow(hit), weakerRow);
+    if (weakHits.length && state.showWeaker) {
+      if (!weakerRow) return false;
+      // On a first fold, render the weak rows already received as well; later pages only add their own.
+      const weak = weakRows.length === 0 ? state.weaker : weakHits;
+      for (const hit of sortedHits(weak)) insert(weakRows, hit, tableRow(hit), null);
+    }
+    return true;
+  }
+  const grid = $content.querySelector(".grid");
+  if (!grid) return false;
+  if (strongHits.length) {
+    const cellsBox = cells(strongHits, "grid");
+    grid.append(...cellsBox.childNodes);
+  }
+  if (weakHits.length) {
+    let toggle = $content.querySelector(".weaker-toggle");
+    if (!toggle) { toggle = weakerToggle(); grid.after(toggle); }
+    if (state.showWeaker) {
+      let weakGrid = $content.querySelector(".grid.weaker-results");
+      if (!weakGrid) {
+        weakGrid = element("div", "grid weaker-results");
+        toggle.after(weakGrid);
+      }
+      // A fold opened for the first time shows the weak rows the first page had put there as well; on later pages
+      // the DOM already has them, so only the new page is added.
+      const weak = weakGrid.childElementCount ? weakHits : state.weaker;
+      const cellsBox = cells(weak, "grid weaker-results");
+      weakGrid.append(...cellsBox.childNodes);
+    }
+  }
+  return true;
+}
+
+/// Keeps the fold's own count current after pages of weaker results arrive (the toggle holds an icon and a text node).
+function updateWeakerToggle() {
+  const toggle = $content.querySelector(".weaker-toggle");
+  if (!toggle) return;
+  const count = state.weaker.length;
+  const text = state.showWeaker ? "Weaker matches" : `${count} weaker ${count === 1 ? "match" : "matches"}`;
+  if (toggle.lastChild?.nodeType === Node.TEXT_NODE) toggle.lastChild.textContent = text;
+  else toggle.append(text);
+}
+
+/// The scroll listener: only strong pages load by themselves; the weaker tail waits for its fold or the button.
+function maybeLoadMore() {
+  if (!state.hasResults || state.loadingMore || !state.query.trim()) return;
+  if ($content.scrollTop + $content.clientHeight < $content.scrollHeight - MORE_MARGIN) return;
+  if (remainingStrong() > 0) loadMore(true);
 }
 
 function setQuery(text) {
@@ -171,6 +437,7 @@ function render() {
   renderSide();
   renderStatus();
   renderBatch();
+  renderPagination();
 }
 
 function renderBar() {
@@ -269,17 +536,22 @@ function resultsTable() {
   const body = element("tbody");
   for (const hit of sortedHits(state.ranked)) body.append(tableRow(hit));
   if (state.weaker.length) {
-    const row = element("tr", "weaker-row");
-    const cell = element("td");
-    cell.colSpan = COLUMNS.length + (isWindows ? 1 : 0);
-    cell.append(weakerToggle());
-    row.append(cell);
-    body.append(row);
+    body.append(weakerTableRow());
     if (state.showWeaker) for (const hit of sortedHits(state.weaker)) body.append(tableRow(hit));
   }
   table.append(head, body);
   wrap.append(table);
   return wrap;
+}
+
+/// The row that folds the weaker results away, between the table's strong rows and its weak ones.
+function weakerTableRow() {
+  const row = element("tr", "weaker-row");
+  const cell = element("td");
+  cell.colSpan = COLUMNS.length + (isWindows ? 1 : 0);
+  cell.append(weakerToggle());
+  row.append(cell);
+  return row;
 }
 
 /// One result in the table: its kind's icon, its name and the place that matched, size, type, date, and what the other
@@ -329,9 +601,9 @@ function sortBy(key) {
   renderContent();
 }
 
-/// The results by the table's column, in the direction chosen; without a column, the best match first.
-function sortedHits(hits) {
-  if (!state.sort) return hits;
+/// The order the table's column puts two results in; `sortedHits` and a page inserted into a sorted table both use
+/// exactly this one, so they can't disagree about where a row goes.
+function compareHits(a, b) {
   const { key, desc } = state.sort;
   const value = (hit) => {
     switch (key) {
@@ -342,11 +614,14 @@ function sortedHits(hits) {
       default: return propertiesOf(hit).toLocaleLowerCase();
     }
   };
-  return [...hits].sort((a, b) => {
-    const left = value(a), right = value(b);
-    const order = typeof left === "number" ? left - right : left.localeCompare(right, undefined, { numeric: true });
-    return order ? order * (desc ? -1 : 1) : nameOf(a.path).localeCompare(nameOf(b.path), undefined, { numeric: true });
-  });
+  const left = value(a), right = value(b);
+  const order = typeof left === "number" ? left - right : left.localeCompare(right, undefined, { numeric: true });
+  return order ? order * (desc ? -1 : 1) : nameOf(a.path).localeCompare(nameOf(b.path), undefined, { numeric: true });
+}
+
+/// The results by the table's column, in the direction chosen; without a column, the best match first.
+function sortedHits(hits) {
+  return state.sort ? [...hits].sort(compareHits) : hits;
 }
 
 /// The table's Type: the extension as file managers show it, or what kind it is when it has none.
@@ -1109,6 +1384,15 @@ function forget(paths, stay = []) {
   const before = rows();
   const at = before.findIndex((hit) => hit.path === state.selection);
   const scroll = $content.scrollTop;
+  const goneStrong = state.ranked.filter((hit) => gone.has(hit.path)).length;
+  // Only rows this list actually has are in its ranking: a path that was already missing from the index (or outside
+  // the filter) must not make the totals and the next offset count a file that was never there.
+  const removed = state.ranked.filter((hit) => gone.has(hit.path)).length
+    + state.weaker.filter((hit) => gone.has(hit.path)).length;
+  // The engine's ranking shrinks by the rows the operation removed; the next page starts that much earlier.
+  state.total = Math.max(0, state.total - removed);
+  state.strongTotal = Math.max(0, state.strongTotal - goneStrong);
+  state.nextOffset = Math.max(0, state.nextOffset - removed);
   const keep = (hit) => !gone.has(hit.path);
   state.ranked = state.ranked.filter(keep);
   state.weaker = state.weaker.filter(keep);
@@ -1125,6 +1409,7 @@ function forget(paths, stay = []) {
   renderSide();
   renderStatus();
   renderBatch();
+  renderPagination();
   if (!$big.hidden) renderBig();
 }
 
@@ -1691,8 +1976,16 @@ function renderStatus() {
   else if (chosen.length) count = `${chosen.length.toLocaleString()} selected · ${bytes(selectedSize(chosen))}`;
   else if (state.hasResults && state.query.trim()) {
     const strong = state.ranked.length, weaker = state.weaker.length;
-    count = app.caveat || (!state.meaning ? "Words only: meaning search isn't available"
-      : `${strong} ${strong === 1 ? "result" : "results"}` + (weaker ? ` · ${weaker} weaker` : ""));
+    const remaining = remainingResults();
+    if (state.total > strong + weaker && remaining > 0) {
+      count = `${(strong + weaker).toLocaleString()} of ${state.total.toLocaleString()}`
+        + (weaker ? ` · ${weaker.toLocaleString()} weaker` : "");
+    } else if (state.total > strong + weaker) {
+      count = `All ${state.total.toLocaleString()} results shown` + (weaker ? ` · ${weaker.toLocaleString()} weaker` : "");
+    } else {
+      count = app.caveat || (!state.meaning ? "Words only: meaning search isn't available"
+        : `${strong} ${strong === 1 ? "result" : "results"}` + (weaker ? ` · ${weaker} weaker` : ""));
+    }
   }
   $("count").textContent = count;
   renderUpdate(app.update);
@@ -1796,6 +2089,9 @@ $("more").onmousedown = (event) => event.preventDefault();
 $("more").onclick = () => ($menu.hidden ? showMainMenu() : hideMenu());
 $("status-line").onclick = () => invoke("choose_folders").catch(failed);
 $("update").onclick = () => invoke("offer_update").catch(failed);
+$more.onmousedown = (event) => event.preventDefault();
+$more.onclick = () => loadMore(false);
+$content.addEventListener("scroll", maybeLoadMore, { passive: true });
 $kinds.onmousedown = (event) => event.preventDefault();
 // The chosen files' bar: its buttons take the clicks but not the keyboard (typing stays in the field).
 $batch.onmousedown = (event) => { if (event.target.closest("button")) event.preventDefault(); };

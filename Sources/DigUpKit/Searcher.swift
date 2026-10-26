@@ -1,5 +1,18 @@
 import Foundation
 
+/// One page of a search, best first, with what the app needs to ask for the next one.
+///
+/// `total` and `strong` describe the whole ranked list, not this page: a page that starts past the strong boundary
+/// must not re-anchor "strong" to its own first hit.
+public struct SearchPage: Sendable {
+    public let hits: [SearchHit]
+    public let total: Int          // files in the full ranking, after kinds and the meaning gates
+    public let strong: Int         // of those, score >= 0.5 × the top score
+    public let topScore: Double
+    public let offset: Int         // where the page starts in the ranking
+    public let consumed: Int       // ranked files this page covered (for the next offset)
+}
+
 public struct SearchHit: Sendable {
     public let path: String
     public let kind: FileKind
@@ -114,6 +127,14 @@ public final class Searcher {
 
     public func search(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
                        zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
+        try page(text, queryVector: queryVector, kinds: kinds, limit: limit, offset: 0, zGate: zGate,
+                 wordWeight: wordWeight, prefixLast: prefixLast).hits
+    }
+
+    /// `search`, but for the page starting at `offset`, with the size of the whole ranking.
+    public func page(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
+                     offset: Int = 0, zGate: Double = 2.0, wordWeight: Double? = nil,
+                     prefixLast: Bool = false) throws -> SearchPage {
         let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
         if queryVector != nil, !vectorsLoaded { try reload() }
         let fileKind = self.fileKind
@@ -189,10 +210,18 @@ public final class Searcher {
 
         let wordRank = Dictionary(words.enumerated().map { ($0.element.file, ($0.offset + 1, $0.element)) },
                                   uniquingKeysWith: { first, _ in first })
+        // Rank once, then page it. The whole order is needed for total/strong anyway, and keeping one order makes
+        // page boundaries stable between requests.
+        let ordered = scored.sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }
+        let total = ordered.count
+        let topScore = ordered.first?.value ?? 0
+        let strong = topScore > 0 ? ordered.prefix { $0.value >= topScore * 0.5 }.count : total
+        let start = min(max(0, offset), total)
+        let count = min(max(0, limit), total - start)
+        let slice = ordered[start ..< start + count]
         var hits: [SearchHit] = []
-        for (file, score) in scored.sorted(by: { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) })
-            .prefix(limit) {
-            let rank = hits.count
+        for (position, (file, score)) in slice.enumerated() {
+            let rank = start + position      // the ranking's rank, not the page's: code's first 10 stay the first 10
             let semantic = best[file]
             let keyword = wordRank[file]
             // Point at the best meaning segment if it stands out; else at the segment the words matched.
@@ -243,7 +272,8 @@ public final class Searcher {
                                   excerpt: snippet ?? storedExcerpt, modified: modified, size: size, info: info,
                                   focus: focus))
         }
-        return hits
+        return SearchPage(hits: hits, total: total, strong: strong, topScore: topScore, offset: start,
+                          consumed: count)
     }
 
     /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that

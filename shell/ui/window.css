@@ -811,6 +811,11 @@ svg { display: block; }
 .status-line { border: 0; padding: 0; background: none; font-size: 11px; color: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .status-line:hover { color: var(--text); }
 .status .spacer { flex: 1; }
+.status .more-results { flex: none; border: 0; padding: 0; background: none; font-size: 11px; color: var(--accent); white-space: nowrap; cursor: pointer; }
+.status .more-results:hover { text-decoration: underline; }
+.status .more-results:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.status .more-results:disabled { color: var(--tertiary); cursor: default; text-decoration: none; }
+.status .more-count { flex: none; color: var(--tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .status .count { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status .update { display: flex; align-items: center; gap: 5px; flex: none; border: 0; padding: 0; background: none; font-size: 11px; color: var(--ember); white-space: nowrap; cursor: pointer; }
 .status .update:disabled { cursor: default; }
