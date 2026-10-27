@@ -2,7 +2,7 @@
 
 **Дата:** 2026-10-27
 
-**Статус:** актуально для ветки `file-operations` (форк `Sucotasch/DigUp`, upstream `ARahim3/DigUp`).
+**Статус:** актуально для ветки `file-operations` (форк `Sucotasch/DigUpPlus`, upstream `ARahim3/DigUp`).
 
 **Зачем этот файл:** чтобы человек или агент, открывший репозиторий без контекста, мог собрать, протестировать и
 упаковать проект на этой машине, не выясняя заново пути, флаги и причины прошлых решений. Здесь только то, что
@@ -21,7 +21,7 @@ macOS-приложение (`Sources/DigUpApp`) в дереве осталось
 `Package.swift` для него нет ни продукта, ни зависимости на Sparkle, `build.sh` и `scripts/release.sh` удалены.
 Форк ориентирован на эту Windows-машину; portable-сборка — основной формат, установщик остался как запасной.
 
-Этот checkout — **Windows-форк**. `origin` = `https://github.com/Sucotasch/DigUp.git`,
+Этот checkout — **Windows-форк**. `origin` = `https://github.com/Sucotasch/DigUpPlus.git`,
 `upstream` = `https://github.com/ARahim3/DigUp.git`. В форке живут:
 
 - пагинация выдачи в главном окне и слои Images (см. `docs/search-results-pagination-plan.md`);

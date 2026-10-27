@@ -644,7 +644,7 @@ fn open_releases(app: AppHandle) -> Result<(), String> {
     app.opener().open_url(RELEASES, None::<&str>).map_err(|error| error.to_string())
 }
 
-const RELEASES: &str = "https://github.com/Sucotasch/DigUp/releases";
+const RELEASES: &str = "https://github.com/Sucotasch/DigUpPlus/releases";
 
 /// Shows a result in the file manager, selected.
 #[tauri::command]

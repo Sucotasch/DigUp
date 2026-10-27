@@ -10,12 +10,12 @@ Search the files on your computer by what's in them, with Google DeepMind's
 operations in the search window (move, copy, delete), index and model folders of your own, and portable Windows
 builds. <a href="#this-fork-vs-upstream">What it changes over upstream</a>.</p>
 
-<p align="center"><a href="https://github.com/Sucotasch/DigUp/releases"><b>Download for Windows</b></a><br>
+<p align="center"><a href="https://github.com/Sucotasch/DigUpPlus/releases"><b>Download for Windows</b></a><br>
 <sub>Free and open source. Everything runs on your computer.</sub></p>
 
 <p align="center">
-<a href="https://github.com/Sucotasch/DigUp/releases"><img src="https://img.shields.io/github/v/release/Sucotasch/DigUp?style=flat-square" alt="Latest release"></a>
-<a href="LICENSE"><img src="https://img.shields.io/github/license/Sucotasch/DigUp?style=flat-square" alt="MIT license"></a>
+<a href="https://github.com/Sucotasch/DigUpPlus/releases"><img src="https://img.shields.io/github/v/release/Sucotasch/DigUpPlus?style=flat-square" alt="Latest release"></a>
+<a href="LICENSE"><img src="https://img.shields.io/github/license/Sucotasch/DigUpPlus?style=flat-square" alt="MIT license"></a>
 </p>
 
 <p align="center"><img src="docs/demo.gif" width="800" alt="DigUp's search panel on a Mac, on Windows and on Linux: a zebra in a video, a podcast minute, a clause in a lease, a dog on the beach in English, Bengali and Arabic, and code that opens in Zed."></p>
@@ -83,7 +83,7 @@ account, no telemetry.
 ## Install
 
 **Windows.** Download `DigUpPlus-x.y.z-windows-x64.zip` from
-[Releases](https://github.com/Sucotasch/DigUp/releases), unpack it anywhere and run `DigUpPlus.exe`. Nothing is
+[Releases](https://github.com/Sucotasch/DigUpPlus/releases), unpack it anywhere and run `DigUpPlus.exe`. Nothing is
 installed, so no admin rights are needed: the helper, llama.cpp's libraries, PDFium, the Swift and C++ runtimes and
 ffmpeg sit in the `helper` folder beside the app. Windows may say it doesn't recognize the app, because it isn't
 signed yet: choose More info, then Run anyway. It needs 64-bit Windows 10 or 11.
@@ -224,7 +224,7 @@ index, and a test checks every llama.cpp update against stored reference vectors
 ## Build from source
 
 ```sh
-git clone https://github.com/Sucotasch/DigUp && cd DigUp
+git clone https://github.com/Sucotasch/DigUpPlus && cd DigUpPlus
 git switch file-operations        # this fork's default branch
 scripts/fetch-vendor.sh           # SQLite, stb, miniz, PDFium (hash-pinned)
 scripts/build-llama.sh            # llama.cpp at a pinned tag, with a one-line patch (a few minutes)
