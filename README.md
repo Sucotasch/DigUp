@@ -267,9 +267,12 @@ text inside screenshots is read only on a Mac, by Apple's text recognition, whic
 languages written without spaces, like Chinese, Japanese and Thai, aren't split into words.
 
 **How do I remove it?**
-Quit DigUp Plus from its tray menu, delete the folder you unpacked, then delete `%APPDATA%\com.sucotasch.digupplus`
-(settings), `%LOCALAPPDATA%\com.sucotasch.digupplus` (logs) and `%LOCALAPPDATA%\DigUpPlus` (the model and the index).
-If it opened at login, turn that off in Settings → General first.
+Quit DigUp Plus from its tray menu and delete the folder you unpacked — that is everything: settings, logs, the
+index, the model and even the webview's own files live in `data` inside it. Nothing is written elsewhere, except the
+open-at-login entry, which is a Run key in the registry — turn that off in Settings → General first if you used it.
+The system folders only ever matter for a build run without its `portable.txt` — an older or hand-copied one, where
+the exe stood alone: `%APPDATA%\com.sucotasch.digupplus` (settings), `%LOCALAPPDATA%\com.sucotasch.digupplus` (logs)
+and `%LOCALAPPDATA%\DigUpPlus` (the model and the index).
 
 ## Contributing
 
