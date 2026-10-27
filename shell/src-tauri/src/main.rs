@@ -1644,7 +1644,13 @@ fn move_index_folder(app: &AppHandle, shell: &Arc<Shell>, target: PathBuf) -> Re
     shell.index.stop();
     shell.search.stop();
     let had_index = !index_folder::data_files(&current).is_empty();
-    let copied = index_folder::copy_to(&current, &target)?;
+    // The destination stays "empty" while the copy runs (the files land under temporary names): the settings page
+    // gets the running total, so the move doesn't look stuck on a big index.
+    let total = index_folder::bytes(&current);
+    let progress = |done: u64| {
+        let _ = app.emit("index-move", json!({"bytes": done, "total": total}));
+    };
+    let copied = index_folder::copy_to(&current, &target, Some(&progress))?;
     if had_index {
         if let Err(error) = index_opens(shell, &target) {
             let _ = index_folder::cleanup(&target);

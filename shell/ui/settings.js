@@ -434,7 +434,14 @@ function renderStorage() {
   for (const id of ["model-change", "model-files", "model-download", "model-delete", "model-cleanup-delete"]) {
     $(id).disabled = busy || downloading || measuring;
   }
-  $("index-use").disabled = indexBusy || measuring;
+  $("index-use").disabled = indexBusy;
+  $("index-change").disabled = indexBusy || measuring;
+  // The speed check blocks only the move (the shell refuses while it runs); the switch just writes a path and may go
+  // on — which is exactly what a person wants while indexing starts over on a folder that lost its index.
+  $("index-use").title = "Use an index you already have, where it is";
+  $("index-change").title = measuring
+    ? "The speed check is running; the move waits for it to end."
+    : "Move the index to another folder";
   $("model-check").disabled = busy || downloading;
   $("model-download").hidden = !(storage.modelRemoved || ["missing", "failed"].includes(model.state));
   $("model-delete").hidden = ["missing", "unavailable"].includes(model.state);
@@ -843,6 +850,14 @@ $("model-confirm-alt").onclick = () => {
   closeModelConfirm();
   action?.alternate?.();
 };
+
+// The move copies the databases through temporary names, so the destination fills only at the end: the running
+// total comes from the shell, or a big index would look stuck.
+tauri.event.listen("index-move", ({ payload }) => {
+  if (!indexBusy || !payload.total) return;
+  indexMessage = `Moving the index… ${Math.floor((100 * payload.bytes) / payload.total)}%`;
+  renderStorage();
+});
 
 tauri.event.listen("model-transfer", ({ payload }) => {
   info.transfer = payload;

@@ -4,6 +4,7 @@
 
 use crate::models;
 use serde_json::{json, Value};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Everything that belongs to the index. `-wal`, `-shm` and `-journal` are SQLite's; `stopped-file.json` is the
@@ -83,8 +84,10 @@ pub fn plan(current: &Path, target: &Path) -> Value {
 }
 
 /// Copies the index's files to `target` through temporary names; on any failure the copies this call made are removed
-/// again and `source` is left untouched. Returns how many bytes were copied.
-pub fn copy_to(source: &Path, target: &Path) -> Result<u64, String> {
+/// again and `source` is left untouched. Returns how many bytes were copied. `progress` gets the running total every
+/// piece, for the settings page: the destination stays "empty" until the end, because every file lands under its
+/// temporary name and is renamed only when whole.
+pub fn copy_to(source: &Path, target: &Path, progress: Option<&dyn Fn(u64)>) -> Result<u64, String> {
     let mut copied: Vec<PathBuf> = Vec::new();
     let mut made_target = false;
     if !target.exists() {
@@ -94,6 +97,9 @@ pub fn copy_to(source: &Path, target: &Path) -> Result<u64, String> {
     }
     let result = (|| -> Result<u64, String> {
         let mut total = 0;
+        // In pieces, so a big database can report itself moving instead of sitting silent for a minute. The buffer
+        // lives on the heap: 8 MB on the stack would overflow a test thread.
+        let mut buffer = vec![0u8; 8 << 20];
         for name in DATA_FILES {
             let from = source.join(name);
             if !from.is_file() {
@@ -109,15 +115,28 @@ pub fn copy_to(source: &Path, target: &Path) -> Result<u64, String> {
                 .map_err(|error| format!("Can't read {}: {error}", from.display()))?;
             let mut output = std::fs::File::create(&temporary)
                 .map_err(|error| format!("Can't write {}: {error}", temporary.display()))?;
-            std::io::copy(&mut input, &mut output)
-                .map_err(|error| format!("Can't copy {}: {error}", from.display()))?;
+            // In pieces.
+            loop {
+                let chunk = input
+                    .read(&mut buffer)
+                    .map_err(|error| format!("Can't read {}: {error}", from.display()))?;
+                if chunk == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buffer[..chunk])
+                    .map_err(|error| format!("Can't write {}: {error}", temporary.display()))?;
+                total += chunk as u64;
+                if let Some(progress) = progress {
+                    progress(total);
+                }
+            }
             output.sync_all().map_err(|error| format!("Can't finish {}: {error}", temporary.display()))?;
             drop(output);
             drop(input);
             std::fs::rename(&temporary, &to)
                 .map_err(|error| format!("Can't put {} in place: {error}", to.display()))?;
             copied.push(to);
-            total += std::fs::metadata(&from).map(|file| file.len()).unwrap_or(0);
         }
         Ok(total)
     })();
@@ -242,7 +261,7 @@ mod tests {
 
         let plan = plan(&old, &new);
         assert_eq!(plan["kind"], "move");
-        assert_eq!(copy_to(&old, &new).unwrap(), 14);
+        assert_eq!(copy_to(&old, &new, None).unwrap(), 14);
         assert!(new.join("index.sqlite").is_file());
         assert!(new.join("index.sqlite-wal").is_file());
         assert!(new.join("code.sqlite").is_file());
@@ -260,6 +279,22 @@ mod tests {
     }
 
     #[test]
+    fn the_copy_reports_its_progress_as_it_goes() {
+        let old = folder("progress-old");
+        let new = folder("progress-new");
+        std::fs::write(old.join("index.sqlite"), vec![0u8; 9 << 20]).unwrap();
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        let copied = copy_to(&old, &new, Some(&|done| seen.lock().unwrap().push(done))).unwrap();
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(copied, *seen.last().unwrap(), "the last report is the whole copy");
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "the total only grows: {seen:?}");
+        assert!(seen.len() >= 2, "9 MB is more than one piece: {seen:?}");
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&new);
+    }
+
+    #[test]
     fn a_failed_copy_leaves_the_source_and_the_target_as_they_were() {
         let old = folder("copy-old");
         let new = folder("copy-new");
@@ -267,7 +302,7 @@ mod tests {
         std::fs::write(old.join("costs.json"), b"costs").unwrap();
         std::fs::write(new.join("costs.json"), b"keep").unwrap();
 
-        let error = copy_to(&old, &new).unwrap_err();
+        let error = copy_to(&old, &new, None).unwrap_err();
         assert!(error.contains("appeared in the new folder"), "{error}");
         assert!(old.join("index.sqlite").is_file());
         assert_eq!(std::fs::read(old.join("costs.json")).unwrap(), b"costs");
