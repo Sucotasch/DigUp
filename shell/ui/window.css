@@ -177,6 +177,11 @@ svg { display: block; }
 /* Everything under the picture keeps its size; the picture takes the height that's left. */
 .side > :not(.preview-picture) { flex: none; }
 
+/* The Images filter's folds: the hidden tail under the weaker matches is drawn fainter. */
+.hidden-results { opacity: 0.6; }
+.tier-note { margin: 0 18px 8px; color: var(--tertiary); font-size: 12px; }
+.weaker-toggle.hidden-more { margin-top: 4px; }
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));

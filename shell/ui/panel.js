@@ -244,9 +244,8 @@ function thumbnail(hit) {
   if (!what) return kindIcon(hit.kind);
   const image = element("img", "thumb");
   image.alt = "";
-  rendered(hit.path, what[0], what[1], pixels)
-    .then((path) => { image.src = fileURL(path); })
-    .catch(() => image.replaceWith(kindIcon(hit.kind)));
+  loadRenderedImage(image, hit.path, what[0], what[1], pixels, null,
+                    (shown) => shown.replaceWith(kindIcon(hit.kind)));
   return image;
 }
 

@@ -239,10 +239,69 @@ function kindIcon(kind) {
 
 /// The helper's JPEG of a page, a frame or a picture, asked for once per file and place.
 const renders = new Map();
+const renderKey = (path, kind, loc, pixels) => `${path}|${kind}|${loc}|${pixels}`;
+
+/// The helper deletes <index>/previews when it starts, so paths cached before a restart point at files that are gone.
+/// The search service announces every start ("ready"); dropping the cache then makes the next picture ask for a fresh
+/// render instead of reusing a dead path.
+if (tauri.event?.listen) {
+  tauri.event.listen("helper", ({ payload }) => {
+    if (payload?.from === "search" && payload.event?.event === "ready") clearRenders();
+  }).catch(() => {});
+}
+
+function clearRenders() {
+  renders.clear();
+}
+
+function forgetRender(path, kind, loc, pixels) {
+  renders.delete(renderKey(path, kind, loc, pixels));
+}
+
 function rendered(path, kind, loc, pixels) {
-  const key = `${path}|${kind}|${loc}|${pixels}`;
-  if (!renders.has(key)) renders.set(key, ask({ op: "render", path, kind, loc, pixels }).then((reply) => reply.image));
+  const key = renderKey(path, kind, loc, pixels);
+  if (!renders.has(key)) {
+    const request = ask({ op: "render", path, kind, loc, pixels }).then((reply) => {
+      if (!reply?.image) throw new Error("the helper made no picture");
+      return reply.image;
+    });
+    renders.set(key, request);
+    // A failed render must not poison the cache: a helper that was restarting can be asked again next time.
+    request.catch(() => { if (renders.get(key) === request) forgetRender(path, kind, loc, pixels); });
+  }
   return renders.get(key);
+}
+
+/// Puts a helper render into an image, and asks once more if that file has gone (the helper was restarted). After the
+/// second failure `fallback` replaces the image, so a result shows its kind's icon instead of the browser's broken one.
+/// The retry uses a fresh element: an error from the old path can arrive after the new `src`, and must not turn a
+/// picture that is about to load into an icon.
+function loadRenderedImage(image, path, kind, loc, pixels, onFile, fallback) {
+  let retried = false;
+  const attempt = (target) => {
+    target.onerror = null;
+    const retry = () => {
+      if (!target.isConnected) return;
+      if (retried) { target.onerror = null; fallback?.(target); return; }
+      retried = true;
+      forgetRender(path, kind, loc, pixels);
+      const fresh = target.cloneNode(false);
+      fresh.removeAttribute("src");   // cloning copies the failed path; don't start loading it again
+      fresh.onerror = null;
+      target.replaceWith(fresh);
+      attempt(fresh);
+    };
+    rendered(path, kind, loc, pixels).then((file) => {
+      if (!target.isConnected) return;
+      target.onerror = retry;
+      onFile?.(file);
+      target.src = fileURL(file);
+    }).catch(() => {
+      if (!target.isConnected) return;
+      retry();
+    });
+  };
+  attempt(image);
 }
 
 /// What the helper renders for a result's picture: [kind, place], or null when it has none (documents, audio, code).

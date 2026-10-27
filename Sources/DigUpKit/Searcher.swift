@@ -11,6 +11,14 @@ public struct SearchPage: Sendable {
     public let topScore: Double
     public let offset: Int         // where the page starts in the ranking
     public let consumed: Int       // ranked files this page covered (for the next offset)
+    /// The whole ranking counted by kind: strong results for the chips, and every result for callers that need the
+    /// full tail without materializing it. Both are independent of this page's offset and limit.
+    public let kindCounts: [FileKind: Int]
+    public let kindTotals: [FileKind: Int]
+    /// The window's cosine layers over the whole image ranking, when `tierThresholds` were given: "visible" (at or
+    /// above the first cutoff), "weak" (the middle fold) and "hidden" (below the second). Nil for an ordinary
+    /// search. Counted over every allowed image, including the hidden tail a cosine floor leaves out of the ranking.
+    public let tierCounts: [String: Int]?
 }
 
 public struct SearchHit: Sendable {
@@ -132,9 +140,14 @@ public final class Searcher {
     }
 
     /// `search`, but for the page starting at `offset`, with the size of the whole ranking.
+    /// `cosineFloor`/`cosineCeiling` and `byCosine` are the window's image layers (the Images filter): keep the
+    /// best segment's cosine within the given band, and rank by cosine itself, so every page boundary falls between
+    /// the layers. `tierThresholds` (visible, weak) asks for the layer counts of the whole image ranking in the
+    /// returned `tierCounts`. Ordinary searches pass none of them and keep the score order and the z gate.
     public func page(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
                      offset: Int = 0, zGate: Double = 2.0, wordWeight: Double? = nil,
-                     prefixLast: Bool = false) throws -> SearchPage {
+                     prefixLast: Bool = false, cosineFloor: Double? = nil, cosineCeiling: Double? = nil,
+                     byCosine: Bool = false, tierThresholds: [Double] = []) throws -> SearchPage {
         let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
         if queryVector != nil, !vectorsLoaded { try reload() }
         let fileKind = self.fileKind
@@ -199,7 +212,20 @@ public final class Searcher {
         let lookup = Self.isLookup(terms) || identifier != nil
         let (meaningWeight, wordsWeight) = lookup ? (0.5, wordWeight * 2) : (1, wordWeight)
         let hinted = Self.kindHints(text)
-        var candidates = Set(best.filter { $0.value.z >= zGate }.keys)
+        // The image layers: visible / weaker / hidden are cut on the best segment's cosine, the same numbers for
+        // every query, where the query-normalized z can't promise that. A floor and a ceiling keep the layers in
+        // separate searches (the hidden tail is fetched on its own); a file the meaning path leaves out can still
+        // come in by its words.
+        let byCosineLayers = byCosine
+        func withinCosine(_ file: Int64) -> Bool {
+            guard byCosineLayers, let cosine = best[file]?.cosine else { return false }
+            if let cosineFloor, cosine < cosineFloor { return false }
+            if let cosineCeiling, cosine >= cosineCeiling { return false }
+            return true
+        }
+        var candidates = byCosine
+            ? Set(best.keys.filter { withinCosine($0) })
+            : Set(best.filter { $0.value.z >= zGate }.keys)
         for (file, share) in coverage where share >= 0.5 { candidates.insert(file) }
         var scored: [Int64: Double] = [:]
         for file in candidates {
@@ -211,11 +237,45 @@ public final class Searcher {
         let wordRank = Dictionary(words.enumerated().map { ($0.element.file, ($0.offset + 1, $0.element)) },
                                   uniquingKeysWith: { first, _ in first })
         // Rank once, then page it. The whole order is needed for total/strong anyway, and keeping one order makes
-        // page boundaries stable between requests.
-        let ordered = scored.sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }
+        // page boundaries stable between requests. The cosine layers rank by that cosine (a file that only matched
+        // by words — no vector — stays at the top), so a page boundary always falls between the layers.
+        let ordered = byCosine
+            ? scored.sorted {
+                let left = best[$0.key]?.cosine ?? 1, right = best[$1.key]?.cosine ?? 1
+                return left == right ? $0.key < $1.key : left > right
+            }
+            : scored.sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }
         let total = ordered.count
-        let topScore = ordered.first?.value ?? 0
-        let strong = topScore > 0 ? ordered.prefix { $0.value >= topScore * 0.5 }.count : total
+        let topScore = ordered.map(\.value).max() ?? 0
+        // `strong` stays the score-based fold of the ordinary search; the cosine layers don't use it.
+        let strong = topScore > 0 ? ordered.filter { $0.value >= topScore * 0.5 }.count : total
+        // Count the full ranking once here, while its kinds are at hand: a paged UI must not mistake the kinds on its
+        // first page for the kinds of the whole query.
+        var kindCounts: [FileKind: Int] = [:]
+        var kindTotals: [FileKind: Int] = [:]
+        let strongKeys = byCosine ? Set(ordered.filter { topScore > 0 && $0.value >= topScore * 0.5 }.map(\.key)) : []
+        for (index, entry) in ordered.enumerated() {
+            guard let kind = fileKind[entry.key] else { continue }
+            kindTotals[kind, default: 0] += 1
+            if byCosine ? strongKeys.contains(entry.key) : index < strong { kindCounts[kind, default: 0] += 1 }
+        }
+        // The layer counts over the whole image ranking, for the window's fold headers: counted over `best`, so the
+        // hidden tail below the floor is included even though this ranking leaves it out.
+        var tierCounts: [String: Int]?
+        if byCosine, tierThresholds.count >= 2 {
+            let visibleCut = tierThresholds[0], weakCut = tierThresholds[1]
+            var counts = ["visible": 0, "weak": 0, "hidden": 0]
+            for (file, semantic) in best where fileKind[file] != nil {
+                if semantic.cosine >= visibleCut { counts["visible", default: 0] += 1 }
+                else if semantic.cosine >= weakCut { counts["weak", default: 0] += 1 }
+                else { counts["hidden", default: 0] += 1 }
+            }
+            // A file that only matched by words has no cosine; the window shows it at once.
+            for (file, share) in coverage where share >= 0.5 && best[file] == nil && fileKind[file] != nil {
+                counts["visible", default: 0] += 1
+            }
+            tierCounts = counts
+        }
         let start = min(max(0, offset), total)
         let count = min(max(0, limit), total - start)
         let slice = ordered[start ..< start + count]
@@ -273,7 +333,7 @@ public final class Searcher {
                                   focus: focus))
         }
         return SearchPage(hits: hits, total: total, strong: strong, topScore: topScore, offset: start,
-                          consumed: count)
+                          consumed: count, kindCounts: kindCounts, kindTotals: kindTotals, tierCounts: tierCounts)
     }
 
     /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that

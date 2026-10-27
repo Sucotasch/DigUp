@@ -7,6 +7,14 @@
 
 const TYPING_PAUSE = 120;   // ms after the last keystroke until the search runs (the query was embedded meanwhile)
 const LIMIT = 120;          // the first page, as before: the window opens on the best results at once
+// The Images filter's cosine layers: shown at once, the middle folded as weaker matches, and the tail behind its own
+// fold. The cutoffs come from live results (2026-10-27, 3 772 images): 0.648 is where "not quite" begins for Asian
+// and Anime, 0.600 where their single irrelevant images end. A query whose whole scale sits lower has both cutoffs
+// moved down under its own top image (TIER_MIN_VISIBLE).
+const IMAGE_TIERS = { visible: 0.648, weak: 0.600 };
+const TIER_MIN_VISIBLE = 30;   // fewer visible images than this: the cutoffs come down to the query's own top
+const TIER_FALL = 0.05;        // how far under the top image the lowered visible cutoff sits
+const TIER_GAP = 0.048;        // how far under that the weak cutoff sits (the same span as 0.648 → 0.600)
 const PAGE_SIZE = 300;      // later pages: measured at ~13–18 ms of DOM each
 const MORE_MARGIN = 400;    // px from the end of the list that asks for the next page
 const FILTERS = [
@@ -53,7 +61,7 @@ const state = {
   text: "",             // what was searched (without "code:")
   ranked: [],           // the strong results, best first
   weaker: [],           // below half the best one's score: folded
-  counts: {},           // strong results of each filter for the query, whatever the filter (the chips' numbers)
+  counts: {},           // results of each filter for the query, whatever the filter (the chips' numbers)
   meaning: true,        // the results matched by meaning too (false: words only)
   hasResults: false,    // the results of the query in the field are in
   total: 0,             // files in the whole ranking (the engine's total; the helper may filter a few)
@@ -66,11 +74,18 @@ const state = {
   selection: null,      // a result's path
   selected: new Set(),  // the files chosen for Move To, Copy To or Delete (their paths; media only)
   anchor: null,         // where a Shift-click or Shift-arrow range starts
-  strong: [],           // the strong results of the query, whatever the filter (the chips' numbers)
   busy: null,           // the file operation under way: {id, kind, done, total, bytes, size, path}
   sheet: false,         // a sheet is up: a confirmation, or an operation's progress
   note: null,           // what the status bar says for a moment after an operation
   showWeaker: false,
+  tiered: false,        // the list is the Images filter's cosine layers (visible / weaker / hidden)
+  tierCutoffs: null,    // {visible, weak} the layers are cut on (the defaults, or lowered for a low-scale query)
+  hidden: [],           // images under the weak cutoff: shown only when their fold is opened
+  hiddenTotal: 0,       // of those, how many the whole image ranking has (the helper's count)
+  hiddenOffset: 0,      // where the next hidden page starts
+  showHidden: false,
+  loadingHidden: false,
+  hiddenError: null,
   showsPreview: true,
   view: "grid",         // how the results are shown: a grid of pictures, or a table (code stays a list)
   sort: null,           // the table's column and direction: { key, desc }; null keeps the best match first
@@ -109,6 +124,8 @@ function run() {
   if (!typed || (code && (!state.info.hasCode || !text))) {
     Object.assign(state, { ranked: [], weaker: [], counts: {}, hasResults: false, selection: null,
                            total: 0, strongTotal: 0, nextOffset: 0, matchesGeneration: null,
+                           tiered: false, tierCutoffs: null, hidden: [], hiddenTotal: 0, hiddenOffset: 0,
+                           showHidden: false, loadingHidden: false, hiddenError: null,
                            loadingMore: false, pageError: null });
     if (typed) state.codePhase = state.info.hasCode ? "hint" : "off";
     render();
@@ -124,16 +141,56 @@ function run() {
   const filter = state.filter === "media" ? MEDIA_FILTER : FILTERS.find((item) => item.key === state.filter);
   state.timer = setTimeout(async () => {
     try {
+      const filtered = Boolean(filter) && !code;
+      // The Images filter is shown in cosine layers: the helper ranks those by the best segment's cosine (not the
+      // fused score) and reports how many of the whole image ranking fall in each layer.
+      const layered = filtered && filter.key === "images";
+      // The chips count the whole query; a helper too old to send its kind totals falls back to this first page.
       const all = await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT });
-      const shown = filter && !code
-        ? await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT, kinds: filter.kinds }) : all;
+      let cutoffs = layered ? { ...IMAGE_TIERS } : null;
+      let shown = all;
+      let tiers = null;
+      if (filtered) {
+        shown = await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT, kinds: filter.kinds,
+                            ...(layered ? tierRequest(cutoffs) : {}) });
+        tiers = layered ? shown.tier_counts ?? null : null;
+        if (layered && tiers && tiers.visible < TIER_MIN_VISIBLE) {
+          // A query whose whole cosine scale sits below the usual cutoffs: both come down under its own top image,
+          // so its best results stay visible instead of all landing in the folds.
+          let top = shown.hits[0]?.cosine;
+          if (top == null && tiers.hidden > 0) {
+            // The usual floor left nothing at all: a look without any floor tells the query's own top.
+            const probe = await ask({ op: "search", q: text, code, meaning: true, limit: 1, kinds: filter.kinds,
+                                      by_cosine: true });
+            top = probe.hits[0]?.cosine;
+          }
+          if (top != null) {
+            cutoffs = { visible: Math.max(0, top - TIER_FALL), weak: Math.max(0, top - TIER_FALL - TIER_GAP) };
+            shown = await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT, kinds: filter.kinds,
+                                ...tierRequest(cutoffs) });
+            tiers = shown.tier_counts ?? tiers;
+          }
+        }
+      }
       if (generation !== state.generation) return;
-      const strong = all.hits.slice(0, all.strong);   // whatever the filter: the chips count all of them
-      Object.assign(state, { counts: countsOf(strong), strong, text, meaning: shown.meaning, hasResults: true,
-                             showWeaker: false, ranked: shown.hits.slice(0, shown.strong),
-                             weaker: shown.hits.slice(shown.strong),
+      // The chips count the whole query; a helper too old to send its kind totals falls back to this first page.
+      const strong = all.hits.slice(0, all.strong);
+      const counts = countsOfReply(all, strong);
+      const visible = [], weak = [];
+      for (const hit of shown.hits) (tierOf(hit, layered ? cutoffs : null) === "visible" ? visible : weak).push(hit);
+      const layers = layered && tiers != null;
+      if (layers && filter.key) counts[filter.key] = tiers.visible;   // the chip's number is what's shown at once
+      Object.assign(state, { counts, text, meaning: shown.meaning, hasResults: true,
+                             // A kind filter asks for every result of that kind, so its weaker tail starts open. The
+                             // All view keeps the fold: there the weak results are noise around unrelated kinds.
+                             showWeaker: Boolean(filter) && !code,
+                             ranked: layers ? visible : shown.hits.slice(0, shown.strong),
+                             weaker: layers ? weak : shown.hits.slice(shown.strong),
+                             tiered: layers, tierCutoffs: cutoffs,
+                             hidden: [], hiddenTotal: layers ? tiers.hidden : 0, hiddenOffset: 0, showHidden: false,
+                             hiddenError: null, loadingHidden: false,
                              total: shown.total ?? shown.hits.length,
-                             strongTotal: shown.strong_total ?? shown.strong,
+                             strongTotal: layers ? tiers.visible : shown.strong_total ?? shown.strong,
                              nextOffset: shown.next_offset ?? shown.hits.length,
                              matchesGeneration: shown.generation ?? null, loadingMore: false, pageError: null });
       if (!rows().some((hit) => hit.path === state.selection)) state.selection = rows()[0]?.path ?? null;
@@ -151,6 +208,19 @@ function run() {
 function pageFilter() {
   if (isCode()) return null;
   return state.filter === "media" ? MEDIA_FILTER : FILTERS.find((item) => item.key === state.filter) ?? null;
+}
+
+/// The helper's request for the Images layers: ranked by cosine, with the hidden tail left out (its fold fetches
+/// that on its own), and the layer counts of the whole image ranking asked for.
+function tierRequest(cutoffs) {
+  return { by_cosine: true, cosine_floor: cutoffs.weak, tier_cutoffs: [cutoffs.visible, cutoffs.weak] };
+}
+
+/// Which image layer a hit belongs to. A file that matched by its words is shown at once, whatever its cosine.
+function tierOf(hit, cutoffs) {
+  if (!cutoffs || hit.keyword_rank != null) return "visible";
+  const cosine = hit.cosine ?? -1;
+  return cosine >= cutoffs.visible ? "visible" : cosine >= cutoffs.weak ? "weak" : "hidden";
 }
 
 function remainingResults() {
@@ -217,7 +287,8 @@ function loadMore(auto = false) {
   // The same mode the first page was ranked in: if the encoder wasn't ready then, later pages must not suddenly
   // switch to meaning and mix two different rankings.
   ask({ op: "search", q: text, code, meaning: state.meaning, limit, offset,
-        ...(filter && !code ? { kinds: filter.kinds } : {}) })
+        ...(filter && !code ? { kinds: filter.kinds } : {}),
+        ...(state.tiered ? tierRequest(state.tierCutoffs) : {}) })
     .then((reply) => {
       if (generation !== state.generation) return;
       if (state.matchesGeneration != null && reply.generation != null
@@ -233,16 +304,16 @@ function loadMore(auto = false) {
       }
       const seen = new Set([...state.ranked, ...state.weaker].map((hit) => hit.path));
       const hits = reply.hits || [];
-      const pageStrong = hits.slice(0, reply.strong ?? 0).filter((hit) => !seen.has(hit.path));
-      const pageWeak = hits.slice(reply.strong ?? 0).filter((hit) => !seen.has(hit.path));
-      if (!filter) {   // the chips' counts can grow as their pages arrive; a filtered page is only a subset
-        state.strong.push(...pageStrong);
-        state.counts = countsOf(state.strong);
-      }
+      const pageStrong = state.tiered
+        ? hits.filter((hit) => tierOf(hit, state.tierCutoffs) === "visible" && !seen.has(hit.path))
+        : hits.slice(0, reply.strong ?? 0).filter((hit) => !seen.has(hit.path));
+      const pageWeak = state.tiered
+        ? hits.filter((hit) => tierOf(hit, state.tierCutoffs) === "weak" && !seen.has(hit.path))
+        : hits.slice(reply.strong ?? 0).filter((hit) => !seen.has(hit.path));
       state.ranked.push(...pageStrong);
       state.weaker.push(...pageWeak);
       state.total = reply.total ?? state.total;
-      state.strongTotal = reply.strong_total ?? state.strongTotal;
+      if (!state.tiered) state.strongTotal = reply.strong_total ?? state.strongTotal;
       state.nextOffset = reply.next_offset ?? (offset + (reply.consumed ?? hits.length));
       state.matchesGeneration = reply.generation ?? state.matchesGeneration;
       if (!inStrong && !state.showWeaker) state.showWeaker = true;
@@ -288,7 +359,7 @@ function appendHits(strongHits, weakHits) {
   if (isCode()) {
     const box = $content.querySelector(".code-list");
     if (!box) return false;
-    let toggle = box.querySelector(".weaker-toggle");
+    let toggle = box.querySelector(".weaker-main");
     for (const hit of strongHits) box.insertBefore(codeRow(hit), toggle ?? null);
     if (weakHits.length) {
       if (!toggle) { toggle = weakerToggle(); box.append(toggle); }
@@ -304,7 +375,7 @@ function appendHits(strongHits, weakHits) {
   if (state.view === "table") {
     const body = $content.querySelector("tbody");
     if (!body) return false;
-    let weakerRow = body.querySelector(".weaker-row");
+    let weakerRow = body.querySelector(".weaker-row:not(.hidden-row)");
     const freshWeak = !weakerRow || !weakerRow.nextElementSibling;
     if (weakHits.length && !weakerRow) {
       weakerRow = weakerTableRow();
@@ -359,7 +430,7 @@ function appendHits(strongHits, weakHits) {
     grid.append(...cellsBox.childNodes);
   }
   if (weakHits.length) {
-    let toggle = $content.querySelector(".weaker-toggle");
+    let toggle = $content.querySelector(".weaker-main");
     if (!toggle) { toggle = weakerToggle(); grid.after(toggle); }
     if (state.showWeaker) {
       let weakGrid = $content.querySelector(".grid.weaker-results");
@@ -379,7 +450,7 @@ function appendHits(strongHits, weakHits) {
 
 /// Keeps the fold's own count current after pages of weaker results arrive (the toggle holds an icon and a text node).
 function updateWeakerToggle() {
-  const toggle = $content.querySelector(".weaker-toggle");
+  const toggle = $content.querySelector(".weaker-main");
   if (!toggle) return;
   const count = state.weaker.length;
   const text = state.showWeaker ? "Weaker matches" : `${count} weaker ${count === 1 ? "match" : "matches"}`;
@@ -421,7 +492,8 @@ function setFilter(key) {
 /// table, each group by the column chosen.
 function rows() {
   const sorted = (hits) => (state.view === "table" && state.sort ? sortedHits(hits) : hits);
-  return [...sorted(state.ranked), ...(state.showWeaker ? sorted(state.weaker) : [])];
+  return [...sorted(state.ranked), ...(state.showWeaker ? sorted(state.weaker) : []),
+          ...(state.showHidden ? sorted(state.hidden) : [])];
 }
 
 function selectedHit() {
@@ -486,7 +558,7 @@ function renderContent() {
   else if (!state.query.trim()) $content.append(home());
   else if (state.codePhase) $content.append(codeHintOrOff());
   else if (!state.hasResults) $content.append(centered(element("div", "spinner")));
-  else if (!state.ranked.length && !state.weaker.length) $content.append(nothingFound());
+  else if (!state.ranked.length && !state.weaker.length && !state.hiddenTotal) $content.append(nothingFound());
   else if (isCode()) $content.append(codeList());
   else if (state.view === "table") $content.append(resultsTable());
   else $content.append(grid());
@@ -499,6 +571,20 @@ function grid() {
   if (state.weaker.length) {
     box.append(weakerToggle());
     if (state.showWeaker) box.append(cells(state.weaker, "grid weaker-results"));
+  }
+  if (state.tiered && (state.hiddenTotal > 0 || state.hidden.length)) {
+    box.append(hiddenToggle());
+    if (state.showHidden) {
+      box.append(cells(state.hidden, "grid hidden-results"));
+      if (state.loadingHidden) box.append(element("div", "tier-note", "Loading hidden images…"));
+      else if (state.hiddenError) box.append(element("div", "tier-note", "Couldn't load the hidden images"));
+      else if (state.hiddenOffset < state.hiddenTotal) {
+        const count = Math.min(PAGE_SIZE, state.hiddenTotal - state.hiddenOffset);
+        const more = element("button", "weaker-toggle hidden-more", `Show ${count.toLocaleString()} more hidden`);
+        more.onclick = () => loadHidden();
+        box.append(more);
+      }
+    }
   }
   return box;
 }
@@ -539,6 +625,13 @@ function resultsTable() {
     body.append(weakerTableRow());
     if (state.showWeaker) for (const hit of sortedHits(state.weaker)) body.append(tableRow(hit));
   }
+  if (state.tiered && (state.hiddenTotal > 0 || state.hidden.length)) {
+    body.append(hiddenTableRow());
+    if (state.showHidden) {
+      for (const hit of sortedHits(state.hidden)) body.append(tableRow(hit));
+      if (state.hiddenOffset < state.hiddenTotal) body.append(hiddenMoreRow());
+    }
+  }
   table.append(head, body);
   wrap.append(table);
   return wrap;
@@ -550,6 +643,29 @@ function weakerTableRow() {
   const cell = element("td");
   cell.colSpan = COLUMNS.length + (isWindows ? 1 : 0);
   cell.append(weakerToggle());
+  row.append(cell);
+  return row;
+}
+
+/// The row that folds the images below the weak cutoff away, under the weaker rows.
+function hiddenTableRow() {
+  const row = element("tr", "weaker-row hidden-row");
+  const cell = element("td");
+  cell.colSpan = COLUMNS.length + (isWindows ? 1 : 0);
+  cell.append(hiddenToggle());
+  row.append(cell);
+  return row;
+}
+
+/// The row that fetches more of the hidden tail, under the hidden rows.
+function hiddenMoreRow() {
+  const row = element("tr", "weaker-row hidden-row");
+  const cell = element("td");
+  cell.colSpan = COLUMNS.length + (isWindows ? 1 : 0);
+  const count = Math.min(PAGE_SIZE, state.hiddenTotal - state.hiddenOffset);
+  const more = element("button", "weaker-toggle hidden-more", `Show ${count.toLocaleString()} more hidden`);
+  more.onclick = () => loadHidden();
+  cell.append(more);
   row.append(cell);
   return row;
 }
@@ -725,12 +841,9 @@ const thumbnails = new IntersectionObserver((entries) => {
     thumbnails.unobserve(image);
     const [kind, loc, pixels] = JSON.parse(image.dataset.render);
     const path = image.closest("[data-path]").dataset.path;
-    rendered(path, kind, loc, pixels)
-      .then((file) => {
-        image.src = fileURL(file);
-        image.closest("[data-path]").dataset.thumb = file;   // the picture under the pointer when it's dragged out
-      })
-      .catch(() => image.replaceWith(bigIcon(kind === "image" ? "image" : kind, true)));
+    loadRenderedImage(image, path, kind, loc, pixels,
+      (file) => { if (image.isConnected) image.closest("[data-path]").dataset.thumb = file; },
+      (shown) => shown.replaceWith(bigIcon(kind === "image" ? "image" : kind, true)));
   }
 }, { root: $content, rootMargin: "300px" });
 
@@ -745,7 +858,7 @@ function folderLine(text, tag = "div") {
 
 function weakerToggle() {
   const count = state.weaker.length;
-  const toggle = element("button", "weaker-toggle" + (state.showWeaker ? " open" : ""));
+  const toggle = element("button", "weaker-toggle weaker-main" + (state.showWeaker ? " open" : ""));
   toggle.innerHTML = ICONS.chevron;
   toggle.append(state.showWeaker ? "Weaker matches" : `${count} weaker ${count === 1 ? "match" : "matches"}`);
   toggle.onmousedown = (event) => event.preventDefault();
@@ -764,6 +877,64 @@ function weakerToggle() {
     renderStatus();
   };
   return toggle;
+}
+
+/// The fold for the images below the weak cutoff: opened, it fetches and shows them a page at a time.
+function hiddenToggle() {
+  const toggle = element("button", "weaker-toggle hidden-toggle" + (state.showHidden ? " open" : ""));
+  toggle.innerHTML = ICONS.chevron;
+  toggle.append(state.showHidden ? "Hidden images"
+    : `${state.hiddenTotal.toLocaleString()} hidden ${state.hiddenTotal === 1 ? "image" : "images"}`);
+  toggle.onmousedown = (event) => event.preventDefault();
+  toggle.onclick = () => {
+    state.showHidden = !state.showHidden;
+    // The hidden ones folded away take their files out of what's chosen, as the weaker fold does.
+    const left = new Set(rows().map((hit) => hit.path));
+    for (const path of state.selected) if (!left.has(path)) state.selected.delete(path);
+    if (state.anchor && !left.has(state.anchor)) state.anchor = null;
+    if (!rows().some((hit) => hit.path === state.selection)) state.selection = rows()[0]?.path ?? null;
+    const scroll = $content.scrollTop;
+    renderContent();
+    $content.scrollTop = scroll;
+    renderSide();
+    renderBatch();
+    renderStatus();
+    if (state.showHidden && !state.hidden.length) loadHidden();
+  };
+  return toggle;
+}
+
+/// Fetches the next page of the hidden tail (below the weak cutoff): a search of its own, since the main ranking
+/// leaves those images out. They are ranked by cosine as well, so the fold opens from its best image down.
+function loadHidden() {
+  if (state.loadingHidden || !state.tiered || !state.hasResults || !state.query.trim()) return;
+  if (state.hiddenOffset >= state.hiddenTotal) return;
+  const generation = state.generation;
+  const filter = pageFilter();
+  const limit = Math.min(PAGE_SIZE, state.hiddenTotal - state.hiddenOffset);
+  const offset = state.hiddenOffset;
+  state.loadingHidden = true;
+  state.hiddenError = null;
+  renderContent();
+  ask({ op: "search", q: state.text, code: false, meaning: state.meaning, limit, offset,
+        ...(filter ? { kinds: filter.kinds } : {}), by_cosine: true, cosine_ceiling: state.tierCutoffs.weak })
+    .then((reply) => {
+      if (generation !== state.generation) return;
+      const seen = new Set(state.hidden.map((hit) => hit.path));
+      state.hidden.push(...(reply.hits || []).filter((hit) => !seen.has(hit.path)));
+      state.hiddenOffset = reply.next_offset ?? (offset + (reply.consumed ?? (reply.hits || []).length));
+      state.loadingHidden = false;
+      renderContent();
+      renderSide();
+      renderStatus();
+      renderBatch();
+    })
+    .catch((error) => {
+      if (generation !== state.generation) return;
+      state.loadingHidden = false;
+      state.hiddenError = String(error);
+      renderContent();
+    });
 }
 
 /// Code results, one under another: the file, where in its repo, the lines that matched.
@@ -1013,13 +1184,29 @@ function mediaCount() {
   return ["screenshots", "images", "video", "audio"].reduce((sum, key) => sum + (state.counts[key] || 0), 0);
 }
 
-/// The chips' numbers from a list of strong results.
+/// The chips' numbers from a list of strong results: the fallback for a helper that doesn't send kind counts.
 function countsOf(hits) {
   if (isCode()) return { code: hits.length };
   const counts = {};
   for (const hit of hits) {
     const key = FILTER_OF_KIND[hit.kind];
     if (key) counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
+}
+
+/// The chips' numbers for the whole query, from the helper's `kind_totals` (counted over the full ranking, not the
+/// first page). `kind_counts` is the strong subset; older helpers have neither, so their first page's strong hits are
+/// the fallback.
+function countsOfReply(reply, strongHits) {
+  const totals = reply?.kind_totals;
+  const kinds = totals && Object.keys(totals).length ? totals : reply?.kind_counts;
+  if (!kinds || typeof kinds !== "object" || !Object.keys(kinds).length) return countsOf(strongHits);
+  if (isCode()) return { code: Number(kinds.code) || 0 };
+  const counts = {};
+  for (const [kind, count] of Object.entries(kinds)) {
+    const key = FILTER_OF_KIND[kind];
+    if (key) counts[key] = (counts[key] || 0) + (Number(count) || 0);
   }
   return counts;
 }
@@ -1385,19 +1572,30 @@ function forget(paths, stay = []) {
   const at = before.findIndex((hit) => hit.path === state.selection);
   const scroll = $content.scrollTop;
   const goneStrong = state.ranked.filter((hit) => gone.has(hit.path)).length;
+  const goneHidden = state.hidden.filter((hit) => gone.has(hit.path)).length;
   // Only rows this list actually has are in its ranking: a path that was already missing from the index (or outside
   // the filter) must not make the totals and the next offset count a file that was never there.
-  const removed = state.ranked.filter((hit) => gone.has(hit.path)).length
-    + state.weaker.filter((hit) => gone.has(hit.path)).length;
-  // The engine's ranking shrinks by the rows the operation removed; the next page starts that much earlier.
+  const goneHits = new Map();
+  for (const hit of [...state.ranked, ...state.weaker, ...state.hidden]) {
+    if (gone.has(hit.path)) goneHits.set(hit.path, hit);
+  }
+  const removed = goneHits.size;
+  // The engine's ranking shrinks by the rows the operation removed; the next page starts that much earlier. The
+  // hidden fold's own count shrinks too.
   state.total = Math.max(0, state.total - removed);
   state.strongTotal = Math.max(0, state.strongTotal - goneStrong);
+  state.hiddenTotal = Math.max(0, state.hiddenTotal - goneHidden);
   state.nextOffset = Math.max(0, state.nextOffset - removed);
+  // The chips count the whole query: take the files that left out of their kind's number. Files still below the
+  // loaded pages stay counted until a later page or a new search brings them.
+  for (const hit of goneHits.values()) {
+    const key = hit.kind === "code" ? "code" : FILTER_OF_KIND[hit.kind];
+    if (key) state.counts[key] = Math.max(0, (state.counts[key] || 0) - 1);
+  }
   const keep = (hit) => !gone.has(hit.path);
   state.ranked = state.ranked.filter(keep);
   state.weaker = state.weaker.filter(keep);
-  state.strong = state.strong.filter(keep);
-  state.counts = countsOf(state.strong);
+  state.hidden = state.hidden.filter(keep);
   const after = rows();
   state.selected = new Set(stay.filter((path) => after.some((hit) => hit.path === path)));
   state.anchor = stay[stay.length - 1] ?? null;
@@ -2409,6 +2607,7 @@ function report() {
         kinds: [...$kinds.querySelectorAll(".chip")].map((chip) => chip.textContent + (chip.classList.contains("selected") ? " (selected)" : "")),
         results: state.ranked.map((hit) => nameOf(hit.path)),
         weaker: state.weaker.length,
+        hidden: state.hidden.length,
         columns: columns(),
         selected: state.selection && nameOf(state.selection),
         thumbnails: `${thumbs.filter((image) => image.complete && image.naturalWidth > 0).length} of ${thumbs.length} drawn`,

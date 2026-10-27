@@ -28,7 +28,8 @@ The search engine in `Sources/DigUpKit` is the same Swift code on every system; 
 `Platform/Apple` and `Platform/Portable` folders. The Mac app is `Sources/DigUpApp` (SwiftUI). The Windows and Linux
 app is `shell/` (Tauri: Rust, with plain HTML and JavaScript for its windows), which runs the engine as a helper
 program. `scripts/` builds llama.cpp, ffmpeg and the packages, and `.github/workflows/packages.yml` shows every step of
-the Windows and Linux builds. "Build from source" in the README gets you started.
+the Windows and Linux builds. "Build from source" in the README gets you started; `docs/development-guide.md` has the
+Windows-specific commands (tests, live runs, installer) and the search-page protocol this fork extends.
 
 ## Updating portable engine dependencies
 

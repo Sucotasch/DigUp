@@ -22,6 +22,23 @@ import Testing
         return try Searcher(store: store, loadVectors: false)
     }
 
+    /// Images whose cosine to the query vector is known (the vector's first component, both unit vectors), for the
+    /// window's cosine layers: [1, 0, …] against [cos, sin, 0, …] is `cos`.
+    private func cosineIndex(_ cosines: [Float]) throws -> (Searcher, [Float]) {
+        let store = try IndexStore(directory: folder)
+        var query = [Float](repeating: 0, count: Vectors.dimension)
+        query[0] = 1
+        for (number, cosine) in cosines.enumerated() {
+            let id = try store.insert(Candidate(path: "/paging/photo-\(number).jpg", kind: .image, size: 1, mtime: 1,
+                                                inode: UInt64(number + 1), device: 1))
+            var vector = [Float](repeating: 0, count: Vectors.dimension)
+            vector[0] = cosine
+            vector[1] = max(0, 1 - cosine * cosine).squareRoot()
+            try store.addSegment(file: id, kind: .image, modality: .image, vector: vector)
+        }
+        return (try Searcher(store: store), query)
+    }
+
     /// Meaning-only results: every file has the same vector, so with `zGate` 0 all of them are candidates. Keyword
     /// search alone stops at 100 files, which is too few to exercise a window-sized page.
     private func vectorIndex(count: Int) throws -> (Searcher, [Float]) {
@@ -106,5 +123,43 @@ import Testing
         #expect(page.topScore == all.first?.score)
         // The page's own first score must not become the threshold for its `strong` count.
         #expect(page.hits.allSatisfy { $0.score <= (all.first?.score ?? 0) })
+    }
+
+    @Test func imageLayersAreCutOnCosineAndPageInOrder() throws {
+        let (searcher, query) = try cosineIndex([0.70, 0.66, 0.645, 0.62, 0.61, 0.55])
+        let first = try searcher.page("layers", queryVector: query, kinds: [.image], limit: 3, offset: 0,
+                                      cosineFloor: 0.60, byCosine: true, tierThresholds: [0.648, 0.60])
+        // The 0.55 image is the hidden tail: the floor leaves it out of the ranking, but the counts still see it.
+        #expect(first.total == 5)
+        #expect(first.hits.map(\.path) == ["/paging/photo-0.jpg", "/paging/photo-1.jpg", "/paging/photo-2.jpg"])
+        #expect(first.tierCounts?["visible"] == 2)
+        #expect(first.tierCounts?["weak"] == 3)
+        #expect(first.tierCounts?["hidden"] == 1)
+
+        let next = try searcher.page("layers", queryVector: query, kinds: [.image], limit: 5, offset: 3,
+                                     cosineFloor: 0.60, byCosine: true, tierThresholds: [0.648, 0.60])
+        #expect(next.hits.map(\.path) == ["/paging/photo-3.jpg", "/paging/photo-4.jpg"])
+
+        // The hidden fold is a search of its own: below the weak cutoff, in cosine order too.
+        let hidden = try searcher.page("layers", queryVector: query, kinds: [.image], limit: 5, offset: 0,
+                                       cosineCeiling: 0.60, byCosine: true)
+        #expect(hidden.total == 1)
+        #expect(hidden.hits.map(\.path) == ["/paging/photo-5.jpg"])
+    }
+
+    @Test func kindCountsCoverTheWholeRankingNotJustThePage() throws {
+        let searcher = try index(count: 7)
+        // A page of two must still report all seven documents: the window's chips count the query, not the page.
+        let page = try searcher.page("paginationword", queryVector: nil, limit: 2, offset: 0)
+        #expect(page.hits.count == 2)
+        #expect(page.kindCounts[.doc] == 7)
+        #expect(page.kindTotals[.doc] == 7)
+        #expect(page.kindCounts.values.reduce(0, +) == page.strong)
+        #expect(page.kindTotals.values.reduce(0, +) == page.total)
+
+        let beyond = try searcher.page("paginationword", queryVector: nil, limit: 2, offset: 99)
+        #expect(beyond.hits.isEmpty)
+        #expect(beyond.kindCounts[.doc] == 7)
+        #expect(beyond.kindTotals[.doc] == 7)
     }
 }

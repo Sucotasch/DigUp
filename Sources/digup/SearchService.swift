@@ -6,14 +6,20 @@ import Foundation
 /// in the Mac app (tens of milliseconds), not a process start.
 ///
 /// Protocol: one JSON request per line on stdin, one JSON response per line on stdout, carrying the request's `id`.
-///   {"op":"search","q":…,"code":bool,"kinds":[…],"limit":n,"offset":n,"meaning":bool,"prefix_last":bool}
+///   {"op":"search","q":…,"code":bool,"kinds":[…],"limit":n,"offset":n,"meaning":bool,"prefix_last":bool,
+///     "by_cosine":bool,"cosine_floor":n,"cosine_ceiling":n,"tier_cutoffs":[visible, weak]}
 ///       → {"hits":[…], "strong":n, "total":n, "strong_total":n, "offset":n, "consumed":n, "next_offset":n,
-///          "generation":n, "meaning":bool, "ms":{"embed":…,"search":…}}
+///          "generation":n, "meaning":bool, "kind_counts":{kind:n}, "kind_totals":{kind:n}, "tier_counts":{…},
+///          "ms":{"embed":…,"search":…}}
+///         `by_cosine` + the band and cutoffs are the window's image layers (the Images filter): the ranking is the
+///         best segment's cosine, the band keeps the hidden tail out (a search of its own fetches it), and
+///         `tier_counts` counts the whole image ranking as visible / weak / hidden.
 ///         `meaning` false: keyword-only (while typing, or while the encoder isn't ready); `strong`: the strong results
 ///         in this page (`Searcher.strongCount`, against the whole query's top); `total`/`strong_total`: the whole
-///         ranking; `next_offset` moves by `consumed` ranked files, not by `hits.count` (the shell filters some out);
-///         `generation` changes when the index is reloaded. Each hit has the fields of `digup search --json` plus
-///         segment_id, modified, size and info.
+///         ranking; `kind_counts`/`kind_totals`: the whole ranking counted by kind (strong and all) — the window's
+///         chips must not count the first page; `next_offset` moves by `consumed` ranked files, not by `hits.count`
+///         (the shell filters some out); `generation` changes when the index is reloaded. Each hit has the fields of
+///         `digup search --json` plus segment_id, modified, size and info.
 ///   {"op":"embed_ahead","q":…,"code":bool}   → {"ok":true}: embeds and caches the text (the panel sends what's typed so
 ///                                               far on every keystroke, so the pause's vector is usually ready)
 ///   {"op":"text","segment":id,"code":bool}    → {"text":…}: the part of a file a hit points at, for the preview
@@ -144,6 +150,12 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             let offset = request["offset"] as? Int ?? 0
             let wantMeaning = request["meaning"] as? Bool ?? true
             let prefixLast = request["prefix_last"] as? Bool ?? false
+            // Dev knobs and the window's image layers; ordinary requests keep the meaning gate and score order.
+            let zGate = (request["zgate"] as? NSNumber)?.doubleValue ?? 2.0
+            let byCosine = request["by_cosine"] as? Bool ?? false
+            let cosineFloor = (request["cosine_floor"] as? NSNumber)?.doubleValue
+            let cosineCeiling = (request["cosine_ceiling"] as? NSNumber)?.doubleValue
+            let tierThresholds = (request["tier_cutoffs"] as? [NSNumber])?.map(\.doubleValue) ?? []
             let started = Date()
             var vector: [Float]?
             var warning: String?
@@ -164,13 +176,16 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             if code {
                 guard let codeSearcher else {
                     return ["hits": [], "strong": 0, "total": 0, "strong_total": 0, "offset": 0, "consumed": 0,
-                            "next_offset": 0, "generation": generation, "meaning": false]
+                            "next_offset": 0, "generation": generation, "meaning": false,
+                            "kind_counts": [:], "kind_totals": [:]]
                 }
                 page = try codeSearcher.page(text, queryVector: vector, limit: limit, offset: offset,
-                                             prefixLast: prefixLast)
+                                             zGate: zGate, prefixLast: prefixLast)
             } else {
                 page = try searcher.page(text, queryVector: vector, kinds: kinds, limit: limit, offset: offset,
-                                         prefixLast: prefixLast)
+                                         zGate: zGate, prefixLast: prefixLast, cosineFloor: cosineFloor,
+                                         cosineCeiling: cosineCeiling, byCosine: byCosine,
+                                         tierThresholds: tierThresholds)
             }
             let hits = page.hits.filter {
                 if code {
@@ -181,14 +196,19 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
                     && !types.contains(($0.path as NSString).pathExtension.lowercased())
                     && FileManager.default.fileExists(atPath: $0.path)
             }
+            var kindCounts: [String: Int] = [:]
+            var kindTotals: [String: Int] = [:]
+            for (kind, count) in page.kindCounts { kindCounts[kind.rawValue] = count }
+            for (kind, count) in page.kindTotals { kindTotals[kind.rawValue] = count }
             var reply: [String: Any] = [
                 "hits": hits.map(hitFields), "strong": strongCount(hits, top: page.topScore), "total": page.total,
                 "strong_total": page.strong, "offset": page.offset, "consumed": page.consumed,
                 "next_offset": min(page.offset + page.consumed, page.total), "generation": generation,
-                "meaning": vector != nil,
+                "meaning": vector != nil, "kind_counts": kindCounts, "kind_totals": kindTotals,
                 "ms": ["embed": Int(embedded.timeIntervalSince(started) * 1000),
                        "search": Int(Date().timeIntervalSince(embedded) * 1000)],
             ]
+            if let tierCounts = page.tierCounts { reply["tier_counts"] = tierCounts }
             if let warning { reply["warning"] = warning }
             return reply
         case "embed_ahead":
