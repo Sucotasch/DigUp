@@ -1,4 +1,4 @@
-# DigUp: руководство разработчика (Windows-форк)
+# DigUp Plus: руководство разработчика (Windows-форк)
 
 **Дата:** 2026-10-27
 
@@ -13,10 +13,13 @@
 
 ## 1. Что это за репозиторий
 
-DigUp — локальный семантический поиск по своим файлам. Один Swift-движок (`Sources/DigUpKit`) обслуживает два
-приложения: macOS SwiftUI (`Sources/DigUpApp`, эталон поведения) и Windows/Linux Tauri (`shell/`, Rust + обычные
-HTML/CSS/JS без сборки). Модель — EmbeddingGemma 2 Q8_0 на llama.cpp, всё считается на машине, сети нет (кроме
-одноразовой загрузки модели; проверка обновлений в форке выключена).
+DigUp Plus — локальный семантический поиск по своим файлам. Движок — Swift (`Sources/DigUpKit`), приложение — Tauri
+(`shell/`, Rust + обычные HTML/CSS/JS без сборки). Модель — EmbeddingGemma 2 Q8_0 на llama.cpp, всё считается на
+машине, сети нет (кроме одноразовой загрузки модели).
+
+macOS-приложение (`Sources/DigUpApp`) в дереве осталось как эталон поведения, но в форке **не собирается**: в
+`Package.swift` для него нет ни продукта, ни зависимости на Sparkle, `build.sh` и `scripts/release.sh` удалены.
+Форк ориентирован на эту Windows-машину; portable-сборка — основной формат, установщик остался как запасной.
 
 Этот checkout — **Windows-форк**. `origin` = `https://github.com/Sucotasch/DigUp.git`,
 `upstream` = `https://github.com/ARahim3/DigUp.git`. В форке живут:
@@ -25,8 +28,9 @@ HTML/CSS/JS без сборки). Модель — EmbeddingGemma 2 Q8_0 на ll
 - файловые операции в главном окне: Move To / Copy To / Delete (см. `docs/file-operations-plan.md`);
 - настройки папки индекса и модели, установщик Windows.
 
-`upstream` не пушить. Обновления приложения в форке отключены (`UPSTREAM_UPDATES=false` в
-`shell/src-tauri/src/updates.rs`): upstream-обновление заменило бы окно и файловые операции.
+`upstream` не пушить. Автообновлений в форке нет: модуль `updates.rs`, плагин updater и настройка «Check for
+updates automatically» удалены, релизы выпускаются вручную. Вместо проверки обновлений Settings → General
+показывает версию и кнопку Download, которая открывает страницу релизов форка (`open_releases`).
 
 ## 2. Раскладка
 
@@ -37,8 +41,8 @@ HTML/CSS/JS без сборки). Модель — EmbeddingGemma 2 Q8_0 на ll
 | `Sources/DigUpKit/Platform/Portable` | Windows/Linux: PDFium, stb, miniz, SQLite, ffmpeg из `Vendor/`. |
 | `Sources/LlamaRuntime` | Биндинг llama.cpp и инференс EmbeddingGemma. |
 | `Sources/digup` | CLI разработчика **и** helper-процессы приложения: `index-service`, `search-service`, `worker`, `download-model`, `estimate`, `search`, `status`, `speed`, `eval`. |
-| `Sources/DigUpApp` | macOS-приложение (эталон). Не собирается на Windows. |
-| `shell/src-tauri` | Rust-оболочка: трей, хоткей, окна, файловые операции, статус, обновления. |
+| `Sources/DigUpApp` | macOS-приложение (эталон поведения). В форке не собирается ни на одной платформе. |
+| `shell/src-tauri` | Rust-оболочка: трей, хоткей, окна, файловые операции, статус. |
 | `shell/ui` | Окна оболочки: `panel.*`, `window.*`, `settings.*`, `setup.*`. Чистые HTML/CSS/JS, без фреймворка и сборки. |
 | `Tests/DigUpKitTests`, `Tests/LlamaRuntimeTests` | Swift Testing (`@Suite`/`@Test`/`#expect`). |
 | `evals/*.json` | Наборы запросов с известными ответами для `digup eval`. |
@@ -88,7 +92,6 @@ python .build/swift_with_vc.py build -c release   # тонкая обёртка:
 - Бинарник: `.build/out/Products/Release-windows-x86_64/digup.exe` (путь надёжнее, чем `.build/release`).
 - SwiftPM 6.4 не может создать symlink `.build\release` на Windows (I/O error 512). Это **безвредно**, сборка
   продолжается. Не «чините» это.
-- Для macOS нужен Xcode 26, не Command Line Tools; `./build.sh` собирает `build.noindex/DigUp.app`.
 
 ### Тесты
 
@@ -163,9 +166,21 @@ shell\src-tauri\target\debug\digup-shell.exe --helper "$bin\digup.exe" `
 
 Перед повторным запуском закройте предыдущий экземпляр: окно/трей/индекс-сервис могут держать файлы.
 
-## 6. Установщик Windows
+## 6. Сборка для Windows
 
-### Штатный путь (то, что в git)
+### Portable — то, что форк выпускает (`scripts/package-portable.sh`)
+
+```sh
+scripts/package-portable.sh        # → dist/DigUpPlus-<version>-windows-x64.zip
+```
+
+Скрипт собирает helper-папку так же, как установщик, затем `npx @tauri-apps/cli@2.12.2 build --no-bundle`, кладёт
+`digup-shell.exe` как `DigUp Plus.exe` рядом с `helper/` и `THIRD-PARTY-NOTICES.txt` и пакует zip через
+`Compress-Archive`. Ничего не устанавливается: распаковал — запустил. Настройки и логи лежат в
+`%APPDATA%\com.sucotasch.digupplus`, индекс и модель — в `%LOCALAPPDATA%\DigUpPlus` (папка переименована из
+`DigUp`, чтобы не смешаться с установленным upstream-DigUp), поэтому папку сборки можно менять, не переиндексируя.
+
+### Установщик (остался от upstream, `scripts/package-windows.sh`)
 
 `scripts/package-windows.sh` — полная упаковка. Требования (заголовок скрипта): Git Bash внутри Visual Studio
 developer environment, `scripts/fetch-vendor.sh`, `scripts/build-llama.sh`, `scripts/build-ffmpeg.sh` (последний —
@@ -175,8 +190,10 @@ developer environment, `scripts/fetch-vendor.sh`, `scripts/build-llama.sh`, `scr
 runtime, Swift runtime, C++ CRT, ffmpeg/ffprobe) → `scripts/notices.py` → `npx @tauri-apps/cli@2.12.2 build
 --bundles nsis` с `helper/` и `THIRD-PARTY-NOTICES.txt` как resources.
 
-Выход: `shell/src-tauri/target/release/bundle/nsis/DigUp_<version>_x64-setup.exe` (~440 МБ).
-Версия берётся из `shell/src-tauri/tauri.conf.json` (сейчас `0.7.0-beta.3`), не из `Cargo.toml`.
+Выход: `shell/src-tauri/target/release/bundle/nsis/DigUp Plus_<version>_x64-setup.exe` (~440 МБ).
+Версия берётся из `shell/src-tauri/tauri.conf.json` (сейчас `0.1.0`), не из `Cargo.toml` (там `0.1.0` у пакета
+оболочки, но имя файла и настройки идут от `tauri.conf.json`). Подписи и update-артефактов больше нет: `signing` из
+скрипта убран вместе с плагином updater.
 
 ### Быстрый путь: изменился только UI
 
@@ -203,9 +220,8 @@ NSIS; сам NSIS — последние ~4 минуты). Успех виден
 Проверка результата:
 
 ```sh
-ls -la shell/src-tauri/target/release/DigUp.exe \
-       shell/src-tauri/target/release/bundle/nsis/
-md5sum shell/src-tauri/target/release/bundle/nsis/DigUp_*_x64-setup.exe   # если сравниваете сборки
+ls -la shell/src-tauri/target/release/digup-shell.exe dist/
+md5sum shell/src-tauri/target/release/bundle/nsis/*_x64-setup.exe dist/*.zip   # если сравниваете сборки
 ```
 
 ### Грабли упаковки
@@ -219,7 +235,7 @@ md5sum shell/src-tauri/target/release/bundle/nsis/DigUp_*_x64-setup.exe   # ес
 | В `bundle/nsis` старый установщик другой версии | Скрипты сами делают `rm -rf` папки; если запускаете Tauri CLI вручную — удалите её |
 | Установщик собрался, но UI старый | Страницы вкомпилированы; нужен `cargo build`/Tauri build после правки `shell/ui` |
 | `package-ui.sh` взял старый helper | Он не собирает Swift; сначала `swift build -c release --product digup` или полный `package-windows.sh` |
-| Подпись/обновления | В форке подпись не настроена: установщик без подписи, автообновление выключено |
+| Подпись/обновления | Ни подписи, ни автообновления: релизы вручную, zip заменяет папку |
 
 ## 7. Проверка UI без установки
 
@@ -330,7 +346,9 @@ Opt-in, отдельный индекс, префикс `code:` (CLI: `--code`).
   `imageLayersAreCutOnCosineAndPageInOrder` и `kindCountsCoverTheWholeRankingNotJustThePage`);
 - `node --check` по всем `shell/ui/*.js` — чисто;
 - headless-стенд слоёв: обычные и `TIER_LOW=1` пороги, без ошибок (числа выше);
-- установщик `DigUp_0.7.0-beta.3_x64-setup.exe` собран после правок UI (03:18, ~440 МБ).
+- `cargo test` в `shell/src-tauri` — 55 тестов, все прошли после удаления updater'а.
+- GitHub Actions в форке выключены (`gh workflow disable ci.yml packages.yml homebrew.yml website.yml`), default
+  branch — `file-operations`; сборки только вручную (`scripts/package-portable.sh`).
 
 Не проверено / открытые задачи:
 
@@ -343,9 +361,8 @@ Opt-in, отдельный индекс, префикс `code:` (CLI: `--code`).
 
 ## 10. Грабли, на которые уже наступали
 
-- **`Package.resolved`** лежит в git. Не удаляйте его «для чистоты»: это ломает воспроизводимость зависимостей.
-  SwiftPM 6.4 на Windows сам удаляет файл при `swift build`/`swift test` (и не всегда пишет заново), поэтому после
-  прогона сборки/тестов верните его `git checkout -- Package.resolved` и не включайте удаление в коммит.
+- **`Package.resolved`** больше нет: после удаления macOS-приложения и Sparkle внешних зависимостей в пакете не
+  осталось, SwiftPM сам удаляет файл. Возвращать его из истории не нужно.
 - **Превью helper'а**: при старте helper удаляет `<index>/previews`, поэтому закэшированные пути в UI мертвы.
   `results.js` слушает событие `helper` (`search`/`ready`), очищает `renders` и повторяет запрос один раз со
   свежим `<img>`; после второй неудачи показывает иконку типа. Не убирайте ретрай.
@@ -355,10 +372,11 @@ Opt-in, отдельный индекс, префикс `code:` (CLI: `--code`).
   брать из самого скачанного файла.
 - **llama.cpp**: обновление должно пройти `Tests/LlamaRuntimeTests/ReferenceVectorTests`; перегенерация эталона
   инвалидирует все индексы.
-- **Приватность**: никакой телеметрии и сетевых вызовов, кроме загрузки модели (и выключенной проверки обновлений).
+- **Приватность**: никакой телеметрии и сетевых вызовов, кроме загрузки модели и открытия страницы релизов по кнопке.
 - **Windows-тесты**: symlink-тест 1314 — среда, не код.
 - **Пути с пробелами**: кавычки в скриптах обязательны; `MSYS_NO_PATHCONV=1` для `cmd.exe /c`.
-- **Установщик**: имя файла зависит от версии в `tauri.conf.json`; не путайте с версией `Cargo.toml` (0.1.0).
+- **Имя сборки**: файлы называются по `productName`/`version` из `tauri.conf.json` (`DigUp Plus_0.1.0_…`).
+
 
 ## 11. Карта документации
 

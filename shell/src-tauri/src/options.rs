@@ -10,7 +10,7 @@ pub const DEFAULT_HOTKEY: &str = "CommandOrControl+Shift+Space";
 pub struct Options {
     /// DigUp's helper, `digup` (default: beside this program, where the installers put it).
     pub helper: PathBuf,
-    /// The index folder. None: the helper's own default (%LOCALAPPDATA%\DigUp\index on Windows,
+    /// The index folder. None: the helper's own default (%LOCALAPPDATA%\DigUpPlus\index on Windows,
     /// ~/.local/share/digup/index on Linux).
     pub index: Option<PathBuf>,
     /// Where the model files are (DIGUP_MODELS for the helpers); None: the helper looks where it always does.
@@ -49,10 +49,6 @@ pub struct Options {
     pub toggle: bool,
     /// Started at login (the autostart entry says so): DigUp waits in the tray. Opened by hand, it shows its window.
     pub at_login: bool,
-    /// Debug runs: check for updates at once (in a dev run too), once.
-    pub debug_update_check: bool,
-    /// Debug runs with `debug_update_check`: install the update found without asking.
-    pub debug_update_install: bool,
 }
 
 impl Options {
@@ -76,8 +72,6 @@ impl Options {
             debug_copy: false,
             toggle: false,
             at_login: false,
-            debug_update_check: false,
-            debug_update_install: false,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -102,8 +96,6 @@ impl Options {
                 "--debug-copy" => options.debug_copy = true,
                 "--toggle" => options.toggle = true,
                 "--at-login" => options.at_login = true,
-                "--debug-update-check" => options.debug_update_check = true,
-                "--debug-update-install" => options.debug_update_install = true,
                 _ => return Err(format!("unknown argument {arg}")),
             }
         }
@@ -131,7 +123,7 @@ impl Options {
     fn default_index_folder(&self) -> Option<PathBuf> {
         if cfg!(windows) {
             return std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
-                .map(|local| PathBuf::from(local).join("DigUp").join("index"));
+                .map(|local| PathBuf::from(local).join("DigUpPlus").join("index"));
         }
         let data = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));

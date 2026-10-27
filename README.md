@@ -1,22 +1,20 @@
 <p align="center"><img src="docs/logo.png" width="96" alt=""></p>
 
-<h1 align="center">DigUp</h1>
+<h1 align="center">DigUp Plus</h1>
 
 <p align="center"><b>Describe it. Dig it up.</b><br>
 Search the files on your computer by what's in them, with Google DeepMind's
 <a href="https://huggingface.co/google/embeddinggemma-2">EmbeddingGemma 2</a>.</p>
 
-<p align="center"><a href="https://github.com/ARahim3/DigUp/releases/latest"><b>Download for Mac</b></a> ·
-<a href="https://github.com/ARahim3/DigUp/releases/tag/v0.7.0-beta.3"><b>Windows (beta)</b></a> ·
-<a href="https://github.com/ARahim3/DigUp/releases/tag/v0.7.0-beta.3"><b>Linux (beta)</b></a><br>
+<p align="center">A Windows-focused fork of <a href="https://github.com/ARahim3/DigUp">DigUp</a>: paged results, file
+operations in the search window (move, copy, delete) and its own builds.</p>
+
+<p align="center"><a href="https://github.com/Sucotasch/DigUp/releases"><b>Download for Windows</b></a><br>
 <sub>Free and open source. Everything runs on your computer.</sub></p>
 
 <p align="center">
-<a href="https://github.com/ARahim3/DigUp/stargazers"><img src="https://img.shields.io/github/stars/ARahim3/DigUp?style=flat-square" alt="GitHub stars"></a>
-<a href="https://github.com/ARahim3/DigUp/releases"><img src="https://img.shields.io/github/downloads/ARahim3/DigUp/total?style=flat-square" alt="Downloads"></a>
-<a href="https://github.com/ARahim3/DigUp/releases/latest"><img src="https://img.shields.io/github/v/release/ARahim3/DigUp?style=flat-square" alt="Latest release"></a>
-<a href="LICENSE"><img src="https://img.shields.io/github/license/ARahim3/DigUp?style=flat-square" alt="MIT license"></a><br>
-<a href="https://trendshift.io/repositories/295333?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-295333" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/295333/daily?language=Swift" alt="ARahim3/DigUp on Trendshift: #1 repository of the day for Swift" width="250" height="55"></a>
+<a href="https://github.com/Sucotasch/DigUp/releases"><img src="https://img.shields.io/github/v/release/Sucotasch/DigUp?style=flat-square" alt="Latest release"></a>
+<a href="LICENSE"><img src="https://img.shields.io/github/license/Sucotasch/DigUp?style=flat-square" alt="MIT license"></a>
 </p>
 
 <p align="center"><img src="docs/demo.gif" width="800" alt="DigUp's search panel on a Mac, on Windows and on Linux: a zebra in a video, a podcast minute, a clause in a lease, a dog on the beach in English, Bengali and Arabic, and code that opens in Zed."></p>
@@ -26,7 +24,7 @@ audio and video into one shared space: a photo of a dog on a beach lands next to
 recording of someone talking about sleep lands next to "where they talk about sleep". It understands more than 100
 languages, it's open (Apache 2.0), and at 740M parameters it's small enough to run on a laptop.
 
-DigUp brings that to the files on your computer, on a Mac, on Windows or on Linux. Pick the folders to search, and it
+DigUp brings that to the files on your computer. Pick the folders to search, and it
 reads the pictures, PDFs, documents, recordings and videos in them. Then describe what you're looking for, in your own
 words, and it finds the match, whatever kind of file it is.
 
@@ -45,56 +43,43 @@ so a search gets both the meaning and the exact string. On a Mac that includes t
 
 ## Private
 
-Nothing you index leaves your computer. DigUp goes online only to download the model once and to check for updates
-once a day. The update check sends nothing about your files, and you can turn it off. No account, no telemetry.
+Nothing you index leaves your computer. DigUp Plus goes online only to download the model once. No update check, no
+account, no telemetry.
 
 ## Install
 
-**Mac.** Download the DMG from [Releases](https://github.com/ARahim3/DigUp/releases/latest) and drag DigUp to
-Applications, or use Homebrew: `brew install --cask arahim3/tap/digup`. It needs an Apple Silicon Mac with macOS 14 or
-later.
+**Windows.** Download `DigUpPlus-x.y.z-windows-x64.zip` from
+[Releases](https://github.com/Sucotasch/DigUp/releases), unpack it anywhere and run `DigUp Plus.exe`. Nothing is
+installed, so no admin rights are needed: the helper, llama.cpp's libraries, PDFium, the Swift and C++ runtimes and
+ffmpeg sit in the `helper` folder beside the app. Windows may say it doesn't recognize the app, because it isn't
+signed yet: choose More info, then Run anyway. It needs 64-bit Windows 10 or 11.
 
-**Windows.** Download `DigUp_x.y.z_x64-setup.exe` from the
-[beta release](https://github.com/ARahim3/DigUp/releases/tag/v0.7.0-beta.3) and run it. It installs for you only, with
-no admin rights. Windows may say it doesn't recognize the app, because the installer isn't signed yet: choose More
-info, then Run anyway. It needs 64-bit Windows 10 or 11.
+Settings live in `%APPDATA%\com.sucotasch.digupplus` and logs in `%LOCALAPPDATA%\com.sucotasch.digupplus\logs`; the
+index and the model in `%LOCALAPPDATA%\DigUpPlus`, so the folder itself can move or be replaced without re-indexing.
 
-**Linux.** On Ubuntu, Debian, Mint and the like, download the .deb and install it:
+1. Open DigUp Plus. While the model downloads (865 MB, once), pick the folders to search: whole folders, or only some
+   of their subfolders. It shows how long the first pass will take for each, measured on your computer.
+2. Press **Ctrl+Shift+Space** in any app and describe what you're looking for.
 
-```sh
-sudo apt install ./DigUp_x.y.z_amd64.deb
-```
-
-The package is called `dig-up`, because Debian already has an unrelated `digup`. Anywhere else, download the
-AppImage, make it executable and run it. Both are for 64-bit Intel and AMD processors and work on Ubuntu 22.04,
-Debian 12, Mint 21 and newer.
-
-Then, on any of them:
-
-1. Open DigUp. While the model downloads (865 MB, once), pick the folders to search: whole folders, or only some of
-   their subfolders. DigUp shows how long the first pass will take for each, measured on your computer.
-2. Press the shortcut in any app and describe what you're looking for: **⇧⌘Space** on a Mac, **Ctrl+Shift+Space** on
-   Windows and Linux.
-
-DigUp keeps itself up to date: the Mac app, the Windows installer and the AppImage install updates with one click.
-With the .deb, DigUp tells you when there's a new version and opens its release page.
+DigUp Plus doesn't update itself. Settings → General shows the version and opens the releases page; a new zip replaces
+the old folder.
 
 ## Using it
 
-| Mac | Windows and Linux | What it does |
-|---|---|---|
-| ⇧⌘Space | Ctrl+Shift+Space | Opens the search panel from any app (you can change it) |
-| ↓ ↑ | ↓ ↑ | Moves through the results |
-| ↩ | Enter | Opens the result: PDFs at the page, recordings and videos at the moment, code in your editor at the line |
-| Space | Space | A big preview, at the page or moment (once you've moved to a result) |
-| ⌘↩ | Ctrl+Enter | Shows it in Finder, Explorer or your file manager |
+| Windows and Linux | What it does |
+|---|---|
+| Ctrl+Shift+Space | Opens the search panel from any app (you can change it) |
+| ↓ ↑ | Moves through the results |
+| Enter | Opens the result: PDFs at the page, recordings and videos at the moment, code in your editor at the line |
+| Space | A big preview, at the page or moment (once you've moved to a result) |
+| Ctrl+Enter | Shows it in Explorer or your file manager |
 | ⌘C | Ctrl+C (in the window) | Copies the file, to paste anywhere |
 | ⌘O | Ctrl+O | The same search in a bigger window, with a picture grid and filters |
 | — | Insert / Ctrl+A | Selects results in the big window to copy, move or delete (Windows; Ctrl+A outside the search field) |
 | — | Ctrl+M | Shows only pictures, screenshots, video and audio in the big window |
 | — | F5 / F6 / F8 | Copy To… / Move To… / Delete the selected files (Windows) |
 
-DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
+DigUp Plus lives in the tray, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
 
 On Windows, the big window can move, copy and delete the pictures, screenshots, video and audio a search shows:
@@ -191,21 +176,21 @@ index, and a test checks every llama.cpp update against stored reference vectors
 
 ## Build from source
 
-On a Mac you'll need Xcode 26, git, and CMake (or `uv`) for llama.cpp. If `xcode-select -p` shows the Command Line
-Tools, switch to Xcode first (`sudo xcode-select -s /Applications/Xcode.app`): they lack the SwiftUI and Swift Testing
-macros the build needs.
-
 ```sh
-git clone https://github.com/ARahim3/DigUp && cd DigUp
+git clone https://github.com/Sucotasch/DigUp && cd DigUp
+git switch file-operations        # this fork's default branch
+scripts/fetch-vendor.sh           # SQLite, stb, miniz, PDFium (hash-pinned)
 scripts/build-llama.sh            # llama.cpp at a pinned tag, with a one-line patch (a few minutes)
-swift build -c release && swift test
-./build.sh                        # → build.noindex/DigUp.app
+scripts/build-ffmpeg.sh           # in MSYS2's MINGW64 shell
+swift build -c release && swift test           # tests: python .build/swift_test.py
+scripts/package-portable.sh       # → dist/DigUpPlus-<version>-windows-x64.zip
 ```
 
-On Windows and Linux you'll need Swift 6.4, Rust and Node; on Windows also Visual Studio's C++ build tools, with the
-commands run in Git for Windows' bash. `scripts/fetch-vendor.sh` and `scripts/build-llama.sh` get the libraries, then
-`scripts/package-linux.sh` makes the .deb and the AppImage, and `scripts/package-windows.sh` the installer.
-[The packages workflow](.github/workflows/packages.yml) has every step, down to the packages each system needs.
+You'll need Swift 6.4, Rust and Node, and Visual Studio's C++ build tools, with the commands run in Git for Windows'
+bash inside a developer environment. `docs/development-guide.md` has the Windows steps in full, including the tests
+and the live runs. `scripts/package-windows.sh` still makes the NSIS installer, and `scripts/package-linux.sh` the
+.deb and AppImage; the fork's own releases are the portable zip. [The packages workflow](.github/workflows/packages.yml)
+documents what each system needs, but it is disabled in this fork: builds are made by hand.
 
 There's also a command-line tool, `.build/release/digup`, that indexes, searches and runs the evals from the terminal
 (`digup --help`). `scripts/make-testbed.sh` builds a folder of test files to try it on on a Mac (it needs ffmpeg), and
@@ -235,24 +220,15 @@ text inside screenshots is read only on a Mac, by Apple's text recognition, whic
 languages written without spaces, like Chinese, Japanese and Thai, aren't split into words.
 
 **How do I remove it?**
-On a Mac, quit it, then delete DigUp.app and `~/Library/Application Support/DigUp`, which holds the model and the
-indexes. Its settings are in `~/Library/Preferences/com.abdurrahim.DigUp.plist`. With Homebrew, `brew uninstall --cask
---zap digup` removes all of it.
-On Windows, uninstall it in Settings → Apps; tick "Delete the application data" to remove the model and the index too.
-On Linux, `sudo apt remove dig-up` (or delete the AppImage), then delete `~/.local/share/digup` (the model and the
-index), `~/.config/com.abdurrahim.DigUp`, `~/.local/share/com.abdurrahim.DigUp` and, if it opened at login,
-`~/.config/autostart/DigUp.desktop`. On GNOME, also remove its shortcut in Settings → Keyboard.
-
-## Support
-
-DigUp is free and open source, and it stays that way. If it helps you and you'd like to support it, you can
-[buy me a coffee](https://arahim3.gumroad.com/l/support).
+Quit DigUp Plus from its tray menu, delete the folder you unpacked, then delete `%APPDATA%\com.sucotasch.digupplus`
+(settings), `%LOCALAPPDATA%\com.sucotasch.digupplus` (logs) and `%LOCALAPPDATA%\DigUpPlus` (the model and the index).
+If it opened at login, turn that off in Settings → General first.
 
 ## Thanks
 
 DigUp is built on [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) by Google DeepMind (Apache 2.0)
-and [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The Mac app uses [Sparkle](https://sparkle-project.org)
-(MIT) for updates. The Windows and Linux app is built with [Tauri](https://tauri.app) (MIT or Apache 2.0) and reads
+and [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The app is built with [Tauri](https://tauri.app) (MIT or
+Apache 2.0) and reads
 files with [PDFium](https://pdfium.googlesource.com/pdfium/) (BSD), [FFmpeg](https://ffmpeg.org) (LGPL),
 [stb](https://github.com/nothings/stb) (public domain) and [miniz](https://github.com/richgel999/miniz) (MIT). Their
 license notices ship with the app.

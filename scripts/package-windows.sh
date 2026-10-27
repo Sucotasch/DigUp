@@ -36,17 +36,8 @@ cp "$swift_runtime"/*.dll "$helper/"
 cp "$crt"/*.dll "$helper/"   # over the Swift runtime's copies of the same: the newer C++ runtime
 cp Vendor/ffmpeg/bin/ffmpeg.exe Vendor/ffmpeg/bin/ffprobe.exe "$helper/"   # the small static build, no DLLs
 
-# With the release's signing key (TAURI_SIGNING_PRIVATE_KEY, and its password) the packages that update themselves are
-# signed for in-app updates (a .sig beside each). Installed copies check those signatures with the public key in
-# tauri.conf.json (plugins.updater.pubkey): a release built without it could never update.
-signing=
-if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-  if grep -q '"pubkey": ""' shell/src-tauri/tauri.conf.json; then
-    echo "the signing key is set, but plugins.updater.pubkey in shell/src-tauri/tauri.conf.json is empty" >&2
-    exit 1
-  fi
-  signing=',"createUpdaterArtifacts":true'
-fi
+# No update signing: DigUp Plus ships by hand (scripts/package-portable.sh is what most builds go out as), and the
+# in-app updater this fork had from upstream is gone rather than pointed at a feed of its own.
 # The license of everything the installer carries, installed beside the app. (python3 can be the Store's stub.)
 python=python3
 python3 -c '' 2> /dev/null || python=python
@@ -56,5 +47,5 @@ rm -rf shell/src-tauri/target/release/bundle/nsis
 # The helper folder goes in as the installer's resources here only: Tauri checks resources on every build.
 resources='{"helper/":"helper/","THIRD-PARTY-NOTICES.txt":"THIRD-PARTY-NOTICES.txt"}'
 (cd shell/src-tauri && npx --yes "@tauri-apps/cli@$TAURI_CLI" build --bundles nsis \
-  --config "{\"bundle\":{\"resources\":$resources$signing}}")
+  --config "{\"bundle\":{\"resources\":$resources}}")
 ls -la shell/src-tauri/target/release/bundle/nsis/

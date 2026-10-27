@@ -51,27 +51,11 @@ let portableTargets: [Target] = [
 ]
 #endif
 
-#if os(macOS)
-let appProducts: [Product] = [.executable(name: "DigUpApp", targets: ["DigUpApp"])]
-let appDependencies: [Package.Dependency] = [
-    // In-app updates (the app only). build.sh embeds the framework in Contents/Frameworks and signs it.
-    .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
-]
-let appTargets: [Target] = [
-    // The menubar + hotkey app. build.sh wraps it into build.noindex/DigUp.app. (The product can't be called
-    // "DigUp": on a case-insensitive disk it would collide with the `digup` CLI binary.)
-    .executableTarget(
-        name: "DigUpApp",
-        dependencies: ["DigUpKit", .product(name: "Sparkle", package: "Sparkle")],
-        swiftSettings: [.defaultIsolation(MainActor.self)],
-        linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
-    ),
-]
-#else
+// The Mac app (Sources/DigUpApp) stays in the tree as the reference behavior the shell's pages follow, but this fork
+// doesn't build it: no app product, no Sparkle, nothing to sign or notarize here.
 let appProducts: [Product] = []
 let appDependencies: [Package.Dependency] = []
 let appTargets: [Target] = []
-#endif
 
 let package = Package(
     name: "DigUp",

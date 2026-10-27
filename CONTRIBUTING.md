@@ -56,7 +56,7 @@ card), the system and DigUp versions (on Linux also the desktop, like GNOME or K
 or searched for, and what you expected instead. Logs are in:
 
 - Mac: `~/Library/Application Support/DigUp/index.noindex` (`app.log` and `indexer.log`)
-- Windows: `%LOCALAPPDATA%\com.abdurrahim.DigUp\logs`, and `worker.log` in `%LOCALAPPDATA%\DigUp\index`
+- Windows: `%LOCALAPPDATA%\com.sucotasch.digupplus\logs`, and `worker.log` in `%LOCALAPPDATA%\DigUpPlus\index`
 - Linux: `~/.local/share/com.abdurrahim.DigUp/logs`, and `worker.log` in `~/.local/share/digup/index`
 
 They can contain file names and your searches, so look through them before you paste.

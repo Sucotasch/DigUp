@@ -42,8 +42,8 @@ extension Data {
 
 /// Where DigUp keeps its own files on each OS: the model and the index.
 public enum AppPaths {
-    /// macOS: ~/Library/Application Support/DigUp. Windows: %LOCALAPPDATA%\DigUp. Linux: $XDG_DATA_HOME/digup, or
-    /// ~/.local/share/digup.
+    /// macOS: ~/Library/Application Support/DigUp. Windows: %LOCALAPPDATA%\DigUpPlus (renamed from DigUp so a fork's
+    /// index and model never mix with an installed DigUp's). Linux: $XDG_DATA_HOME/digup, or ~/.local/share/digup.
     public static var applicationSupport: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let environment = ProcessInfo.processInfo.environment
@@ -51,9 +51,9 @@ public enum AppPaths {
         return home.appendingPathComponent("Library/Application Support/DigUp")
         #elseif os(Windows)
         if let local = environment["LOCALAPPDATA"], !local.isEmpty {
-            return URL(fileURLWithPath: local).appendingPathComponent("DigUp")
+            return URL(fileURLWithPath: local).appendingPathComponent("DigUpPlus")
         }
-        return home.appendingPathComponent("AppData/Local/DigUp")
+        return home.appendingPathComponent("AppData/Local/DigUpPlus")
         #else
         if let data = environment["XDG_DATA_HOME"], !data.isEmpty {
             return URL(fileURLWithPath: data).appendingPathComponent("digup")

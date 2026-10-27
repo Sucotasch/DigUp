@@ -72,8 +72,8 @@ fn quoted(word: &str) -> String {
 #[cfg(target_os = "linux")]
 pub fn hand_over() -> bool {
     // tauri-plugin-single-instance 2.5's object: the app's identifier + ".SingleInstance", and that as a path.
-    const NAME: &str = "com.abdurrahim.DigUp.SingleInstance";
-    const PATH: &str = "/com/abdurrahim/DigUp/SingleInstance";
+    const NAME: &str = "com.sucotasch.digupplus.SingleInstance";
+    const PATH: &str = "/com/sucotasch/digupplus/SingleInstance";
     let Ok(connection) = zbus::blocking::Connection::session() else { return false };
     let args: Vec<String> = std::env::args().collect();
     let folder = std::env::current_dir().map(|folder| folder.display().to_string()).unwrap_or_default();
@@ -208,7 +208,7 @@ pub mod kde {
 
     const SERVICE: &str = "org.kde.kglobalaccel";
     /// The component, the action, and their names as System Settings shows them (sent as a slice: `as` on D-Bus).
-    const ACTION: [&str; 4] = ["com.abdurrahim.DigUp", "toggle-panel", "DigUp", "Show or Hide the Search Panel"];
+    const ACTION: [&str; 4] = ["com.sucotasch.digupplus", "toggle-panel", "DigUp Plus", "Show or Hide the Search Panel"];
     // KGlobalAccel's flags (kglobalacceld.h), and Qt's modifiers in a key code.
     const SET_PRESENT: u32 = 2;
     const IS_DEFAULT: u32 = 8;

@@ -66,12 +66,12 @@ pub fn data_folder() -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
-            return PathBuf::from(local).join("DigUp");
+            return PathBuf::from(local).join("DigUpPlus");
         }
         if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
-            return PathBuf::from(profile).join("AppData").join("Local").join("DigUp");
+            return PathBuf::from(profile).join("AppData").join("Local").join("DigUpPlus");
         }
-        PathBuf::from("DigUp")
+        PathBuf::from("DigUpPlus")
     }
     #[cfg(target_os = "macos")]
     {

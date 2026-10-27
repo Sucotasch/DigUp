@@ -1,6 +1,6 @@
 //! What the person chose: the folders DigUp searches, what it skips in them, the hotkey, and whether setup is done. A
-//! JSON file in the app's config folder (%APPDATA%\com.abdurrahim.DigUp on Windows, ~/.config/com.abdurrahim.DigUp on
-//! Linux). Launch arguments (`--roots`, `--hotkey`) stand in for it in dev runs.
+//! JSON file in the app's config folder (%APPDATA%\com.sucotasch.digupplus on Windows,
+//! ~/.config/com.sucotasch.digupplus on Linux). Launch arguments (`--roots`, `--hotkey`) stand in for it in dev runs.
 
 use crate::hours::Hours;
 use serde::{Deserialize, Serialize};
@@ -35,8 +35,6 @@ pub struct Settings {
     pub window: Option<WindowPlace>,
     /// A click on the tray icon (Windows): "panel" shows the search panel, anything else opens the window.
     pub tray_click: String,
-    /// The daily check for updates was turned off (Settings → General; it's on by default).
-    pub update_checks_off: bool,
     /// The model runs on the processor even where the graphics card measured faster (Settings → General): for a card
     /// whose results come back wrong or empty. The helpers get `DIGUP_DEVICE=cpu`.
     pub processor_only: bool,
@@ -44,8 +42,6 @@ pub struct Settings {
     pub confirm_move_copy_off: bool,
     /// Asking before deleting (to the Recycle Bin) was turned off (Settings → General).
     pub confirm_delete_off: bool,
-    /// When DigUp last checked for updates (seconds since 1970).
-    pub update_checked: u64,
     /// The folder with both model files (Settings → Storage). None: the default folder.
     pub models_folder: Option<String>,
     /// The volume the folder was chosen on: a drive letter that comes back with another disk must not be written to.

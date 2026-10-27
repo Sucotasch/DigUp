@@ -7,6 +7,9 @@ build.noindex/
 # Dev runs (scripts/dev-run.sh): their indexes, models and settings
 .dev/
 
+# scripts/package-portable.sh: the folder and the zip it makes
+/dist/
+
 # Python: the reference worker's environment
 worker/.venv/
 __pycache__/
