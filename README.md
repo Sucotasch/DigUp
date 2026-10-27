@@ -7,7 +7,8 @@ Search the files on your computer by what's in them, with Google DeepMind's
 <a href="https://huggingface.co/google/embeddinggemma-2">EmbeddingGemma 2</a>.</p>
 
 <p align="center">A Windows-focused fork of <a href="https://github.com/ARahim3/DigUp">DigUp</a>: paged results, file
-operations in the search window (move, copy, delete) and its own builds.</p>
+operations in the search window (move, copy, delete), index and model folders of your own, and portable Windows
+builds. <a href="#this-fork-vs-upstream">What it changes over upstream</a>.</p>
 
 <p align="center"><a href="https://github.com/Sucotasch/DigUp/releases"><b>Download for Windows</b></a><br>
 <sub>Free and open source. Everything runs on your computer.</sub></p>
@@ -27,6 +28,29 @@ languages, it's open (Apache 2.0), and at 740M parameters it's small enough to r
 DigUp brings that to the files on your computer. Pick the folders to search, and it
 reads the pictures, PDFs, documents, recordings and videos in them. Then describe what you're looking for, in your own
 words, and it finds the match, whatever kind of file it is.
+
+## This fork vs upstream
+
+The engine is the same Swift code as upstream's: one `DigUpKit` behind the app shell, the same model, the same index
+format, the same privacy rules. The macOS SwiftUI app stays in the tree as the reference behavior but isn't built
+here. What this fork changes is what surrounds the engine:
+
+- **Windows only, portable.** Upstream ships a macOS app with an installer and an updater; this fork builds a portable
+  Windows folder — `DigUpPlus.exe` beside `helper\` — that runs from anywhere with no install step, no admin rights
+  and no updater. Releases are cut by hand; GitHub Actions is off.
+- **File operations.** The big results window can move, copy and delete the files it shows. Delete goes to the
+  Recycle Bin; paths it refuses (too long) get a separate, explicitly confirmed permanent delete. A taken name becomes
+  `photo (2).jpg` instead of an overwrite, and the index follows every change without reading the files again.
+- **The index and the model live where you point them.** Settings → Storage: use an index you already have in place
+  (nothing is copied, and it is checked to open before it is chosen), move one to another disk, or point at model
+  files you already downloaded.
+- **A first run opens Settings, not a wizard.** Nothing has to be chosen before DigUp is usable, and nothing
+  downloads by itself — the model asks first.
+- **Paged results and cosine layers.** The window loads results a page at a time (120, then 300, appended in place),
+  and the Images filter shows its ranking in layers — visible, weaker, hidden — with a fold for each.
+- **A keyboard-first results window.** Tab switches between the search field and the results, Del deletes the file
+  under the cursor (the ticked ones, when some are ticked), Enter confirms the delete sheet, and the view stays on the
+  file it was on across operations and index updates.
 
 ## What you can find
 
@@ -49,14 +73,14 @@ account, no telemetry.
 ## Install
 
 **Windows.** Download `DigUpPlus-x.y.z-windows-x64.zip` from
-[Releases](https://github.com/Sucotasch/DigUp/releases), unpack it anywhere and run `DigUp Plus.exe`. Nothing is
+[Releases](https://github.com/Sucotasch/DigUp/releases), unpack it anywhere and run `DigUpPlus.exe`. Nothing is
 installed, so no admin rights are needed: the helper, llama.cpp's libraries, PDFium, the Swift and C++ runtimes and
 ffmpeg sit in the `helper` folder beside the app. Windows may say it doesn't recognize the app, because it isn't
 signed yet: choose More info, then Run anyway. It needs 64-bit Windows 10 or 11.
 
 The zip is portable: settings, logs, the index and the model live in `data` inside the folder you unpacked (Settings →
 Storage shows it), so a new zip can replace the old one without re-indexing. To keep that folder somewhere else, launch
-`DigUp Plus.exe --data <folder>` (or set `DIGUP_DATA`).
+`DigUpPlus.exe --data <folder>` (or set `DIGUP_DATA`).
 
 1. Open DigUp Plus. While the model downloads (865 MB, once), pick the folders to search: whole folders, or only some
    of their subfolders. It shows how long the first pass will take for each, measured on your computer.
@@ -78,6 +102,8 @@ the old folder.
 | ⌘O | Ctrl+O | The same search in a bigger window, with a picture grid and filters |
 | — | Insert / Ctrl+A | Selects results in the big window to copy, move or delete (Windows; Ctrl+A outside the search field) |
 | — | Ctrl+M | Shows only pictures, screenshots, video and audio in the big window |
+| — | Tab | Switches the keyboard between the search field and the results (big window) |
+| — | Del | Deletes the file under the cursor, or the ticked ones (Windows); Enter confirms the Recycle Bin sheet |
 | — | F5 / F6 / F8 | Copy To… / Move To… / Delete the selected files (Windows) |
 
 DigUp Plus lives in the tray, where you can see how indexing is going,
@@ -85,10 +111,11 @@ pause it, or open Settings. Opening it from the Start menu or your app list show
 
 On Windows, the big window can move, copy and delete the pictures, screenshots, video and audio a search shows:
 select them and use the bar under the results or the right-click menu. A name that's taken gets a number
-(`photo (2).jpg`) instead of overwriting a file; Delete goes to the Recycle Bin. If a path is too long for the Recycle
+(`photo (2).jpg`) instead of overwriting a file; Delete goes to the Recycle Bin, and the confirmation sheet opens with
+the keyboard on the delete itself (Enter confirms, Escape keeps the files). If a path is too long for the Recycle
 Bin, DigUp lists the affected folders and offers a separate permanent delete only after you confirm that it cannot be
-undone. Moving or deleting updates the index without reading the files again, and a copy that lands in a folder you
-search is indexed like any new file.
+undone — there Enter keeps the files, and only the click deletes. Moving or deleting updates the index without
+reading the files again, and a copy that lands in a folder you search is indexed like any new file.
 
 A few things differ by system:
 
@@ -184,14 +211,14 @@ scripts/fetch-vendor.sh           # SQLite, stb, miniz, PDFium (hash-pinned)
 scripts/build-llama.sh            # llama.cpp at a pinned tag, with a one-line patch (a few minutes)
 scripts/build-ffmpeg.sh           # in MSYS2's MINGW64 shell
 swift build -c release && swift test           # tests: python .build/swift_test.py
-scripts/package-portable.sh       # → dist/DigUpPlus-<version>-windows-x64.zip
+scripts/package-portable.sh       # → shell/src-tauri/target/release/DigUpPlus.exe (+ helper, portable.txt)
 ```
 
 You'll need Swift 6.4, Rust and Node, and Visual Studio's C++ build tools, with the commands run in Git for Windows'
 bash inside a developer environment. `docs/development-guide.md` has the Windows steps in full, including the tests
-and the live runs. `scripts/package-windows.sh` still makes the NSIS installer, and `scripts/package-linux.sh` the
-.deb and AppImage; the fork's own releases are the portable zip. [The packages workflow](.github/workflows/packages.yml)
-documents what each system needs, but it is disabled in this fork: builds are made by hand.
+and the live runs. This fork's releases are the portable zip, cut by hand: upstream's `scripts/package-windows.sh`
+(NSIS installer) and `scripts/package-linux.sh` (.deb and AppImage) are not part of it, and [the packages
+workflow](.github/workflows/packages.yml) that documents what each system needs is disabled here.
 
 There's also a command-line tool, `.build/release/digup`, that indexes, searches and runs the evals from the terminal
 (`digup --help`). `scripts/make-testbed.sh` builds a folder of test files to try it on on a Mac (it needs ffmpeg), and

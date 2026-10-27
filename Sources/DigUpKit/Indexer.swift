@@ -132,7 +132,12 @@ public final class Indexer {
         var byInode: [String: FileRecord] = [:]
         for file in existing {
             byPath[file.path] = file
-            byInode["\(file.device):\(file.inode)"] = file
+            // (0,0) is "identity unknown" (a dataless cloud placeholder, a file that couldn't be opened): every such
+            // row would share this one key, and a move could land its vectors on the wrong file. A row without a
+            // known identity moves the long way, delete + insert, which re-embeds but keeps results right.
+            if file.inode != 0 || file.device != 0 {
+                byInode["\(file.device):\(file.inode)"] = file
+            }
         }
         let seen = Set(crawl.candidates.map(\.path))
         var movedFrom = Set<String>()

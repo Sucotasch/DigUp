@@ -78,6 +78,9 @@ select.field {
 .privacy-text { font-size: 12px; color: var(--secondary); line-height: 1.5; margin: 0; }
 .problem { color: #c4441c; }
 
+/* Done: everything is saved as it's changed, so this closes the settings and leaves the app's own window up. */
+.settings-footer { flex: none; display: flex; justify-content: flex-end; padding: 10px 20px; border-top: 1px solid var(--line); }
+
 .model-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 6px; }
 .model-actions button { font-size: 12px; }
 .model-actions .danger-link { color: #c4441c; }

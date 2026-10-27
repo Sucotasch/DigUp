@@ -169,11 +169,15 @@ svg { display: block; }
   width: 324px;
   overflow-y: auto;
   padding: 16px;
-  border-left: 1px solid var(--line);
   background: var(--pane);
   display: flex;
   flex-direction: column;
 }
+
+/* The preview pane's divider: a 5px drag strip whose line is the pane's own border. The arrows resize it in place. */
+.splitter { flex: none; width: 5px; cursor: col-resize; border-left: 1px solid var(--line); }
+.splitter:hover { border-left-color: var(--accent); }
+.splitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* Everything under the picture keeps its size; the picture takes the height that's left. */
 .side > :not(.preview-picture) { flex: none; }
 
@@ -762,8 +766,9 @@ svg { display: block; }
 }
 .batch .batch-summary { color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .batch .spacer { flex: 1; }
-.batch button { padding: 4px 9px; font-size: 12px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--accent); }
+.batch button { padding: 4px 10px; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: inherit; }
 .batch button:hover:not(:disabled) { background: var(--fill); }
+.batch button:active:not(:disabled) { filter: brightness(0.92); }
 .batch button.danger { color: #d7443e; }
 .batch button:disabled { opacity: 0.45; }
 .batch .batch-divider { width: 1px; height: 18px; margin: 0 2px; background: var(--line); }
@@ -816,10 +821,11 @@ svg { display: block; }
 .status-line { border: 0; padding: 0; background: none; font-size: 11px; color: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .status-line:hover { color: var(--text); }
 .status .spacer { flex: 1; }
-.status .more-results { flex: none; border: 0; padding: 0; background: none; font-size: 11px; color: var(--accent); white-space: nowrap; cursor: pointer; }
-.status .more-results:hover { text-decoration: underline; }
+.status .more-results { flex: none; padding: 2px 9px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: inherit; white-space: nowrap; cursor: pointer; }
+.status .more-results:hover:not(:disabled) { background: var(--fill); }
+.status .more-results:active:not(:disabled) { filter: brightness(0.92); }
 .status .more-results:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.status .more-results:disabled { color: var(--tertiary); cursor: default; text-decoration: none; }
+.status .more-results:disabled { opacity: 0.45; cursor: default; }
 .status .more-count { flex: none; color: var(--tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .status .count { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ring { width: 12px; height: 12px; flex: none; }

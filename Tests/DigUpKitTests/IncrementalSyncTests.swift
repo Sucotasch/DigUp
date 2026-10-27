@@ -40,6 +40,30 @@ import Testing
         #expect(try indexer.sync(roots).changed == 1)   // B was left for a later full sync
     }
 
+    @Test func anUnknownIdentityNeverWinsAMove() throws {
+        // A dataless placeholder (OneDrive) or a file that couldn't be opened reports (0,0): every such row shares
+        // the one key, so none of them may win a move — the vectors would land on the wrong file. The move goes the
+        // long way, delete + insert. The candidate here has a real identity; a placeholder candidate is the case the
+        // guard exists for (Audit.md finding 4).
+        let first = try write("root/one/note.txt")
+        let second = try write("root/two/note.txt")
+        let candidate = try write("root/three/note.txt")
+        let root = base.appendingPathComponent("root")
+        let store = try IndexStore(directory: base.appendingPathComponent("index"))
+        let indexer = try indexer(store)
+        let attributes = try FileManager.default.attributesOfItem(atPath: candidate.path)
+        let size = Int64((attributes[.size] as? NSNumber)?.int64Value ?? 0)
+        let mtime = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        for path in [first.path, second.path] {   // rows the way a dataless crawl records them: identity unknown
+            _ = try store.insert(Candidate(path: path, kind: .doc, size: size, mtime: mtime, inode: 0, device: 0))
+        }
+        try FileManager.default.removeItem(at: first)
+        try FileManager.default.removeItem(at: second)
+        let sync = try indexer.sync([root], changedPaths: [first.path, second.path, candidate.path])
+        #expect(sync.moved == 0)
+        #expect(sync.added == 1 && sync.removed == 2)
+    }
+
     @Test func aMoveAcrossScopesKeepsItsRow() throws {
         let old = try write("root/old/note.txt")
         let new = base.appendingPathComponent("root/new/note.txt")

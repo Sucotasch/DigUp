@@ -55,12 +55,13 @@ pub fn plan(current: &Path, target: &Path) -> Value {
     }
     match models::folder_state(target, None) {
         models::FolderState::Unavailable => return invalid("That disk isn't available.".into()),
-        models::FolderState::WrongVolume => return invalid("That folder is on a different disk.".into()),
         models::FolderState::NotFolder => return invalid(format!("{} isn't a folder.", target.display())),
-        models::FolderState::Available | models::FolderState::Missing => {}
+        // WrongVolume can't come back here: it needs an expected volume, and a move to another disk is allowed.
+        models::FolderState::Available | models::FolderState::Missing | models::FolderState::WrongVolume => {}
     }
     if let Some(file) = conflict(target) {
-        return invalid(format!("That folder already has an index ({}).", file.display()));
+        return invalid(format!("That folder already has an index ({}): Use Existing Index… works on it where it is.",
+                               file.display()));
     }
     let previews = target.join("previews");
     if previews.exists() {

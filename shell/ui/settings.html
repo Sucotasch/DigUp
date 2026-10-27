@@ -187,11 +187,13 @@
         <div class="fact" id="data-row" hidden><span>App folder</span><button class="path-button" id="data-path"></button></div>
       </div>
       <div class="model-actions">
+        <button id="index-use">Use Existing Index…</button>
         <button id="index-change">Move Index Folder…</button>
       </div>
-      <p class="note">Moving the index pauses indexing, copies its databases to the folder you choose, checks that they
-        open, and then removes the old files. A fast local disk is best; network and removable disks can make search
-        unreliable.</p>
+      <p class="note">Use Existing Index… points DigUp Plus at an index you already have — the folder with
+        `index.sqlite` in it — and uses it where it is: nothing is copied. Move Index Folder… pauses indexing, copies
+        the index to the folder you choose, checks that it opens, and then removes the old files. A fast local disk is
+        best; network and removable disks can make search unreliable.</p>
       <p class="note" id="index-note" hidden></p>
       <div class="confirm" id="index-confirm" hidden>
         <p id="index-confirm-text"></p>
@@ -208,6 +210,9 @@
 
     <p class="note problem" id="problem" hidden></p>
   </main>
+  <footer class="settings-footer">
+    <button class="primary" id="done">Done</button>
+  </footer>
   <script src="shortcut.js"></script>
   <script src="settings.js"></script>
 </body>

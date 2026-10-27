@@ -93,7 +93,14 @@ public struct FolderSelection: Equatable, Sendable {
     }
 
     public static func isInside(_ path: String, _ folder: String) -> Bool {
-        path.hasPrefix(folder.hasSuffix("/") ? folder : folder + "/")
+        // Windows compares paths without case (SearchService.isCrawled and echo.rs do too): a folder stored as
+        // `C:\One\Photos` still contains `c:\one\photos\a.jpg`. The lowercase allocates per call; if a crawl ever
+        // shows that cost, normalize the stored roots instead.
+        #if os(Windows)
+        let path = path.lowercased()
+        let folder = folder.lowercased()
+        #endif
+        return path.hasPrefix(folder.hasSuffix("/") ? folder : folder + "/")
     }
 
     public static func parent(_ path: String) -> String {

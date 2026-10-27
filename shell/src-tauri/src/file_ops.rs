@@ -497,6 +497,10 @@ fn reload_index(shell: &crate::Shell) -> Result<(), String> {
 }
 
 fn ask(shell: &crate::Shell, request: Value) -> Result<(), String> {
+    // An index move holds this lock for its whole copy: a follow-up that lands mid-move waits for it and then asks
+    // the search service, whose launch points at the new index by then — not at the old one a helper would open
+    // while its database is being read. The file work above is never held up for more than one follow-up.
+    let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
     let reply = tauri::async_runtime::block_on(shell.search.ask(request))
         .map_err(|error| format!("the index didn't follow: {error}"))?;
     if reply["ok"].as_bool() == Some(false) {

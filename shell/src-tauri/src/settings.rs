@@ -54,8 +54,8 @@ pub struct Settings {
     pub index_folder: Option<String>,
 }
 
-/// The window's size inside its frame (logical pixels), where it was (physical; Wayland doesn't tell), and whether it
-/// filled the screen.
+/// The window's size inside its frame (logical pixels), where it was (physical; Wayland doesn't tell), whether it
+/// filled the screen, and the preview pane's width (None: the stylesheet's default).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WindowPlace {
@@ -64,12 +64,35 @@ pub struct WindowPlace {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub maximized: bool,
+    pub side: Option<f64>,
 }
 
 impl Settings {
-    /// The file's settings, or the defaults when there's none (or it can't be read).
+    /// The file's settings, or the defaults when there's none (or it can't be read). A file that can't be parsed is
+    /// kept as `settings.json.bad`: the choices in it are the person's, and the next save would overwrite them for
+    /// good. A file that can't be read at all (permissions) stays where it is; the log line is the only trace.
     pub fn load(path: &Path) -> Settings {
-        std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+        match std::fs::read(path) {
+            Ok(data) => match serde_json::from_slice(&data) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    let backup = path.with_extension("json.bad");
+                    match std::fs::rename(path, &backup) {
+                        Ok(()) => eprintln!("digup-shell: {} couldn't be read ({error}); kept it as {}",
+                                            path.display(), backup.display()),
+                        Err(backup_error) => eprintln!("digup-shell: {} couldn't be read ({error}); keeping it aside \
+                                                        failed too ({backup_error})", path.display()),
+                    }
+                    Settings::default()
+                }
+            },
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("digup-shell: can't read {}: {error}", path.display());
+                }
+                Settings::default()
+            }
+        }
     }
 
     /// Written whole to a temporary file first, so a crash never leaves half of it.
@@ -106,6 +129,34 @@ mod tests {
         let older = Settings::load(&path);
         assert!(older.models_folder.is_none() && older.models_volume.is_none() && !older.model_removed);
         assert!(older.index_folder.is_none());
+        // The preview pane's width rides with the window's place, and an older file without it defaults to None.
+        let path = folder.join("place.json");
+        let settings = Settings { window: Some(WindowPlace { width: 1040.0, height: 700.0, x: None, y: None,
+                                                              maximized: false, side: Some(412.0) }),
+                                  ..Settings::default() };
+        settings.save(&path).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.window.and_then(|place| place.side), Some(412.0));
+        std::fs::write(&path, br#"{"window": {"width": 1040.0, "height": 700.0}}"#).unwrap();
+        assert_eq!(Settings::load(&path).window.and_then(|place| place.side), None);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_malformed_settings_file_is_kept_aside_as_bad_and_defaults_are_used() {
+        let folder = std::env::temp_dir().join(format!("DigUp-settings-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("settings.json");
+        let broken = br#"{"folders": ["C:/Keep"], "hotkey"#;
+        std::fs::write(&path, broken).unwrap();
+        let loaded = Settings::load(&path);
+        assert!(loaded.folders.is_empty());          // the defaults, not a half-read file
+        assert!(!path.exists());                     // the bad file was moved, so a save can't overwrite it
+        let kept = std::fs::read(folder.join("settings.json.bad")).unwrap();
+        assert_eq!(kept, broken.as_slice());         // the person's choices are recoverable
+        // A missing file is the ordinary first run: defaults, and nothing to keep aside.
+        let missing = folder.join("none.json");
+        assert!(Settings::load(&missing).folders.is_empty());
         let _ = std::fs::remove_dir_all(&folder);
     }
 }

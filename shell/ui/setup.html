@@ -29,8 +29,8 @@
 
     <section class="page" id="model" hidden>
       <h2>Where should the model and the index live?</h2>
-      <p class="subtitle">DigUp Plus needs its AI model (865 MB) once. Download it, use files you already have, or skip
-        this for now. An index you already have can be used in place: nothing is copied.</p>
+      <p class="subtitle">DigUp Plus needs its AI model (865 MB) once: download it, or point at files you already have.
+        An index you already have is used in place: nothing is copied.</p>
       <div class="progress-card model-card">
         <div class="progress-line">
           <span class="progress-what">Model folder</span>
@@ -39,20 +39,13 @@
         <p class="progress-note path" id="model-path"></p>
         <p class="progress-note problem" id="model-note" hidden></p>
       </div>
-      <div class="model-actions">
-        <button id="model-use">Use Existing Folder…</button>
-        <button class="link" id="model-skip">Skip for Now</button>
-      </div>
-
       <div class="progress-card model-card">
         <div class="progress-line">
-          <span class="progress-what">Index</span>
+          <span class="progress-what">Index folder</span>
+          <button class="link" id="index-change">Change…</button>
         </div>
         <p class="progress-note path" id="setup-index-path"></p>
         <p class="progress-note" id="setup-index-note" hidden></p>
-      </div>
-      <div class="model-actions">
-        <button id="index-use">Use Existing Index…</button>
       </div>
     </section>
 
@@ -61,8 +54,12 @@
       <p class="subtitle" id="folders-subtitle">Pick folders, and open one to leave out some of its subfolders. The
         first pass reads everything once; after that DigUp Plus keeps up with changes as they happen.</p>
       <div class="folders" id="folder-list"></div>
-      <button class="link" id="add-folder">Add Folder…</button>
-      <p class="note">DigUp Plus only reads files: it never changes, moves or uploads them.</p>
+      <div class="model-actions">
+        <button class="link" id="add-folder">Add Folder…</button>
+        <button class="link" id="skip-indexing">Skip Indexing for Now</button>
+      </div>
+      <p class="note">DigUp Plus only reads files: it never changes, moves or uploads them. Nothing is indexed until you
+        choose folders; they can be added later in Settings → Folders.</p>
     </section>
 
     <section class="page" id="code" hidden>
@@ -115,6 +112,7 @@
     <span class="model" id="model-status"></span>
     <span class="summary" id="summary"></span>
     <span class="buttons">
+      <button id="model-skip" hidden>Skip for Now</button>
       <button id="back" hidden>Back</button>
       <button class="primary" id="next">Continue</button>
     </span>

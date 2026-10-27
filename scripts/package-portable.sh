@@ -1,13 +1,13 @@
 #!/bin/bash
-# Builds DigUp Plus's portable Windows folder: the Tauri shell beside its helper (llama.cpp with the CUDA runtime it
-# needs, PDFium, the Swift and C++ runtimes, ffmpeg), zipped so it runs from any folder with no install step. This fork's
-# builds come from here: a portable folder is quicker to hand out and to replace while the app is still changing shape.
-# Settings, the index and the model still live in the app's own folders (%APPDATA% and %LOCALAPPDATA% under
-# com.sucotasch.digupplus); "portable" means nothing is installed and nothing else is written.
+# Builds DigUp Plus: the Tauri shell beside its helper (llama.cpp with the CUDA runtime it needs, PDFium, the Swift and
+# C++ runtimes, ffmpeg) in shell/src-tauri/target/release, the one build place, with a portable.txt that keeps its
+# settings, logs, index and model in the `data` folder there (options.rs) instead of %APPDATA% and %LOCALAPPDATA% under
+# com.sucotasch.digupplus. Nothing is installed and nothing else is written; the folder runs from anywhere, and a copy of
+# it runs from anywhere too.
 # Run it in Git for Windows' bash inside a Visual Studio developer environment, after scripts/fetch-vendor.sh,
 # scripts/build-llama.sh and scripts/build-ffmpeg.sh (that one in MSYS2's MINGW64 shell). Needs Swift, Rust, Python and
 # Node (for Tauri's CLI):
-#   scripts/package-portable.sh      → dist/DigUpPlus-<version>-windows-x64.zip
+#   scripts/package-portable.sh      → shell/src-tauri/target/release/DigUpPlus.exe (with helper\ and portable.txt)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ -x Vendor/ffmpeg/bin/ffmpeg.exe ]] || { echo "no Vendor/ffmpeg/bin/ffmpeg.exe: run scripts/build-ffmpeg.sh in MSYS2" >&2; exit 1; }
@@ -21,8 +21,9 @@ swift build -c release --product digup
 # SwiftPM 6.4 can't make the .build/release link on Windows (I/O error 512), so ask it where the exe is.
 bin=$(swift build -c release --show-bin-path)
 
-# What goes beside the shell, in helper\ ("DigUp Plus.exe" and "digup.exe" can't share a folder): the helper finds the
-# DLLs, llama.cpp's backends and ffmpeg in its own folder. The C++ runtime goes with them, so nothing needs installing
+# What goes beside the shell, in helper\: the helper finds the DLLs, llama.cpp's backends and ffmpeg in its own folder
+# (the helper used to share the shell's folder, where its digup.exe would have collided with the shell's older name
+# DigUp.exe: Windows doesn't tell them apart). The C++ runtime goes with them, so nothing needs installing
 # first; the shell itself links its C runtime statically (.cargo/config.toml).
 swift_root=$(cd "$(dirname "$(command -v swift)")/../../../.." && pwd)   # …/Swift from …/Swift/Toolchains/*/usr/bin
 swift_runtime=$(ls -d "$swift_root"/Runtimes/*/usr/bin | tail -1)
@@ -47,21 +48,28 @@ python=python3
 python3 -c '' 2> /dev/null || python=python
 CUDA_RUNTIME_DIR="$cuda" "$python" scripts/notices.py windows shell/src-tauri/THIRD-PARTY-NOTICES.txt
 
-# The shell alone: no installer, no bundle. Its helper folder is a sibling in the zip, not a bundle resource.
+# The shell alone: no installer, no bundle. Its helper folder is a sibling in the folder, not a bundle resource.
 (cd shell/src-tauri && npx --yes "@tauri-apps/cli@$TAURI_CLI" build --no-bundle)
 
-# cargo writes digup-shell.exe; Tauri renames it to productName, which is what a build with bundles leaves behind.
-built=shell/src-tauri/target/release/digup-shell.exe
-[[ -f "$built" ]] || built="shell/src-tauri/target/release/$product.exe"
-[[ -f "$built" ]] || { echo "no shell binary in shell/src-tauri/target/release" >&2; exit 1; }
-folder="dist/DigUpPlus-$version-windows-x64"
-rm -rf "dist"/*.zip "$folder"
-mkdir -p "$folder"
-cp "$built" "$folder/$product.exe"
-cp -r "$helper" "$folder/helper"
-cp shell/src-tauri/THIRD-PARTY-NOTICES.txt "$folder/"
+# Everything lands in target/release, the one build place: the shell beside its helper, the notices and portable.txt.
+release=shell/src-tauri/target/release
+# cargo writes digup-shell.exe; Tauri renames it to mainBinaryName ("DigUpPlus"). Both names are looked for, so the
+# step works either way.
+exe=$release/DigUpPlus.exe
+built=$release/digup-shell.exe
+[[ -f "$built" ]] || built="$exe"
+[[ -f "$built" ]] || { echo "no shell binary in $release" >&2; exit 1; }
+# Older names of the same program go, so the folder holds one exe and no one runs a stale one by mistake.
+if [[ "$built" != "$exe" ]]; then
+  rm -f "$exe"
+  cp "$built" "$exe"
+fi
+rm -f "$release/digup-shell.exe" "$release/DigUp Plus.exe" "$release/DigUp.exe"
+rm -rf "$release/helper"
+cp -r "$helper" "$release/helper"
+cp shell/src-tauri/THIRD-PARTY-NOTICES.txt "$release/"
 # Says this copy is portable: the shell keeps settings, logs, index and model in `data` here (options.rs) instead of
 # %APPDATA% and %LOCALAPPDATA%. `--data <folder>` or DIGUP_DATA points them anywhere else.
-printf 'DigUp Plus keeps its settings, logs, index and model in the data folder beside this file.\n' > "$folder/portable.txt"
-(cd dist && powershell -NoProfile -Command "Compress-Archive -Path 'DigUpPlus-$version-windows-x64' -DestinationPath 'DigUpPlus-$version-windows-x64.zip' -Force")
-ls -la dist/
+printf 'DigUp Plus keeps its settings, logs, index and model in the data folder beside this file.\n' > "$release/portable.txt"
+ls -la "$exe" "$release/helper" "$release/portable.txt" "$release/THIRD-PARTY-NOTICES.txt"
+echo "DigUp Plus $version: run $exe"

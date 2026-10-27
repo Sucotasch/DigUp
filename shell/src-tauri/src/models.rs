@@ -413,14 +413,9 @@ fn remove_with_retry(path: &Path) -> std::io::Result<()> {
 }
 
 /// A helper process that is running and can be stopped (the model transfer: download, copy, verify).
+#[derive(Default)]
 pub struct Transfer {
     child: Mutex<Option<Child>>,
-}
-
-impl Default for Transfer {
-    fn default() -> Self {
-        Transfer { child: Mutex::default() }
-    }
 }
 
 impl Transfer {

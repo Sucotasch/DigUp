@@ -37,7 +37,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 use watcher::FolderWatcher;
@@ -97,6 +97,8 @@ struct Shell {
     watchdog_stops: Mutex<Vec<Instant>>,
     /// The window's size inside its frame, as its page last reported it (GTK's own counts its title bar and shadow).
     window_inner: Mutex<Option<(f64, f64)>>,
+    /// The preview pane's width as the window's page reports it (`preview_resized`): kept with the window's place.
+    preview_width: Mutex<Option<f64>>,
     /// A search the panel hands the window (its query, and the kind of results to show): taken when the window opens.
     window_search: Mutex<Option<(String, Option<String>)>>,
     /// Debug runs with setup: the panel's query waits until the first index is in.
@@ -381,6 +383,11 @@ async fn file_operation(app: AppHandle, shell: State<'_, Arc<Shell>>, request: V
 /// What's in the index now, without a sync: after a move or delete changed it directly (`file_operation`).
 async fn refresh_counts(app: &AppHandle) {
     let shell = app.state::<Arc<Shell>>().inner().clone();
+    // Mid-move the helpers are closed: the counts would come back from the old index, or start one on it. The
+    // move's own events refresh the line, and so does the next search.
+    if shell.index_busy.load(Ordering::SeqCst) {
+        return;
+    }
     let Ok(reply) = shell.search.ask(json!({"op": "status"})).await else { return };
     let mut event = json!({"event": "counts"});
     for key in ["files", "searchable", "pending", "unfinished"] {
@@ -400,11 +407,15 @@ fn cancel_file_operation(id: u64) {
 
 /// Move To… / Copy To…: the folder the files go to (none when the picker is cancelled).
 #[tauri::command]
-async fn pick_destination_folder(app: AppHandle, title: Option<String>) -> Option<String> {
+async fn pick_destination_folder(window: tauri::WebviewWindow, app: AppHandle, title: Option<String>)
+    -> Option<String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().set_title(title.unwrap_or_else(|| "Choose Folder".into())).pick_folder(move |folder| {
-        let _ = sender.send(folder);
-    });
+    // Belongs to the window that asked: it opens over it, and the window itself can't be used until it's answered
+    // (without a parent, Windows puts the dialog in the screen's top-left corner, behind whatever is there).
+    app.dialog().file().set_parent(&window).set_title(title.unwrap_or_else(|| "Choose Folder".into()))
+        .pick_folder(move |folder| {
+            let _ = sender.send(folder);
+        });
     receiver.await.ok().flatten().and_then(|folder| folder.into_path().ok())
         .map(|path| path.display().to_string())
 }
@@ -490,9 +501,9 @@ fn setup_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
 
 /// Folders chosen in the system's folder picker (none when it's cancelled).
 #[tauri::command]
-async fn pick_folders(app: AppHandle) -> Vec<String> {
+async fn pick_folders(window: tauri::WebviewWindow, app: AppHandle) -> Vec<String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().set_title("Add Folders").pick_folders(move |folders| {
+    app.dialog().file().set_parent(&window).set_title("Add Folders").pick_folders(move |folders| {
         let _ = sender.send(folders);
     });
     let picked = receiver.await.ok().flatten().unwrap_or_default();
@@ -703,6 +714,8 @@ fn window_info(shell: State<'_, Arc<Shell>>) -> Value {
         "debugQuery": shell.options.debug_window,
         "debugSettings": shell.options.debug_settings,
         "debugCopy": shell.options.debug_copy,
+        "previewWidth": (*shell.preview_width.lock().unwrap())
+            .or_else(|| shell.settings.lock().unwrap().window.as_ref().and_then(|place| place.side)),
     })
 }
 
@@ -755,6 +768,12 @@ fn pause_indexing(app: AppHandle, paused: bool) {
 #[tauri::command]
 fn window_resized(shell: State<'_, Arc<Shell>>, width: f64, height: f64) {
     *shell.window_inner.lock().unwrap() = Some((width, height));
+}
+
+/// The preview pane's width after a drag of its divider (`window_resized`'s sibling: kept with the window's place).
+#[tauri::command]
+fn preview_resized(shell: State<'_, Arc<Shell>>, width: f64) {
+    *shell.preview_width.lock().unwrap() = Some(width);
 }
 
 /// Ctrl+W in a window.
@@ -833,13 +852,13 @@ fn main() {
             set_confirm_delete, debug_query, debug_report, window_info, destination_conflicts, operation_confirmations,
             app_state, open_window, open_settings, choose_folders, index_now, quit_app, close_window, pause_indexing,
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
-            remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
+            remove_code_folder, turn_off_code, set_code_editor, window_resized, preview_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
             set_tray_click, open_licenses, open_releases,
             file_operation, cancel_file_operation, pick_destination_folder,
             pick_model_folder, pick_model_files, model_folder_plan, model_folder_apply, download_model,
             model_check, model_import, delete_model_files, delete_old_model_files, model_manifest,
-            setup_model_download, setup_model_use, setup_model_skip, setup_index_use, pick_index_folder,
-            index_folder_plan, move_index
+            setup_model_download, setup_model_use, setup_model_skip, setup_index_use, pick_index_folder, ask_confirm,
+            index_folder_plan, index_folder_use, move_index
         ])
         .build(tauri::generate_context!())
         .expect("DigUp couldn't start");
@@ -950,6 +969,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         reloaded: Mutex::new(Instant::now()),
         watchdog_stops: Mutex::default(),
         window_inner: Mutex::new(None),
+        preview_width: Mutex::new(None),
         window_search: Mutex::new(None),
         debug_query_sent: AtomicBool::new(false),
         quitting: AtomicBool::new(false),
@@ -1014,11 +1034,14 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     });
     // A first launch chooses the model (or skips it) in setup before anything is downloaded; an install that already
     // has both files goes on as before, with no download. Later starts always go through `start_model`.
-    if shell.is_set_up() || models::complete(&shell.models_folder()) {
+    // Nothing is downloaded by itself, not even on a finished install: the files are 865 MB and the folder may just be
+    // empty (a fresh portable copy, a moved disk). `start_model` only tidies up and measures when both files are there;
+    // Settings and setup's own Download ask before fetching anything.
+    if models::complete(&shell.models_folder()) {
         start_model(&handle, &shell);
     } else {
-        // Setup is about to ask where the model goes: say what's there now. The field starts as "checking", and on a first
-        // launch no check runs, so the page would wait forever (and the note replaced its buttons: they share no id now).
+        // Setup or Settings will ask where the model goes: say what's there now. The field starts as "checking", and
+        // with no check running the set-up page would wait forever.
         let folder = shell.models_folder();
         let state = match models::folder_state(&folder, shell.settings.lock().unwrap().models_volume) {
             models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder =>
@@ -1032,14 +1055,23 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     } else {
         changed(&handle);
     }
-    if !shell.is_set_up() {
-        show_setup(&handle)?;
+    // A first launch counts as set up from here on: it opens Settings, where the folders, the index and the model are
+    // chosen, each on its own tab. There is no set-up wizard (a debug run still walks one: `--debug-setup`), and
+    // nothing has to be chosen before DigUp is usable.
+    let first = !shell.is_set_up();
+    if first {
+        mark_set_up(&shell);
     }
     let options = &shell.options;
-    if options.toggle || options.debug_show && options.debug_window.is_none() {
+    if first && !options.toggle && !options.debug_setup {
+        if let Err(error) = show_settings(&handle) {
+            eprintln!("digup-shell: can't open the settings: {error}");
+        }
+    } else if options.toggle || options.debug_show && options.debug_window.is_none() {
         // Started by the shortcut (DigUp wasn't running): the panel comes up as it would have.
         show_panel(&handle);
-    } else if options.debug_window.is_some() || shell.is_set_up() && !options.at_login && options.debug_query.is_none() {
+    } else if options.debug_window.is_some()
+        || !first && shell.is_set_up() && !options.at_login && options.debug_query.is_none() {
         // Opened by hand: the window, so opening DigUp never looks like nothing happened (at login it waits in the
         // tray).
         if let Err(error) = show_window(&handle) {
@@ -1386,6 +1418,7 @@ fn remember_place(window: &tauri::WebviewWindow) {
             }
         }
     }
+    place.side = *shell.preview_width.lock().unwrap();
     settings.window = Some(place);
     let _ = settings.save(&shell.settings_path);
 }
@@ -1417,7 +1450,20 @@ fn show_code_folders(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// The setup window (first launch, and Choose Folders… later). Debug runs that click through it keep it hidden.
+/// The settings, written at the first launch: DigUp is usable without choosing anything, so a first run opens
+/// Settings rather than a wizard, and every run after it is an ordinary one.
+fn mark_set_up(shell: &Arc<Shell>) {
+    let mut settings = shell.settings.lock().unwrap();
+    if settings.set_up {
+        return;
+    }
+    settings.set_up = true;
+    if let Err(error) = settings.save(&shell.settings_path) {
+        eprintln!("digup-shell: can't save the settings: {error}");
+    }
+}
+
+/// The setup window (Choose Folders… and the code folder list in Settings, and a debug run's first launch).
 fn show_setup(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("setup") {
         let _ = window.show();
@@ -1444,7 +1490,7 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     }
     let options = &app.state::<Arc<Shell>>().options;
-    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+    let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("DigUp Plus Settings")
         .inner_size(660.0, 620.0)
         .resizable(false)
@@ -1452,6 +1498,17 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
         .center()
         .visible(!options.debug_settings || options.debug_show)
         .build()?;
+    // Closing the settings — Done or the window's X — leaves the person with DigUp Plus itself: its window comes up. A
+    // first launch opens the settings, and a tray icon alone would look like nothing had happened. (The window is made
+    // after this event has been answered: made inside it, WebView2 deadlocks on Windows.)
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { .. } = event {
+            later(&handle, |app| {
+                let _ = show_window(app);
+            });
+        }
+    });
     Ok(())
 }
 
@@ -1529,6 +1586,12 @@ fn index_folder_plan(shell: State<'_, Arc<Shell>>, target: String) -> Value {
 /// A dev or checked run named the index folder on its command line; Settings can't change what that run uses.
 const FIXED_INDEX: &str = "DigUp was started with a fixed index folder (--index). Start it without that argument to move the index.";
 
+/// Clears `index_busy` when the index work that set it ends, however it ends.
+struct Busy<'a>(&'a AtomicBool);
+impl Drop for Busy<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+}
+
 /// Settings → Storage → Move Index Folder…: stops the helpers that hold the databases, copies the index to `target`,
 /// checks that it opens, saves the choice, and only then removes the old files. A failure leaves the old index in use.
 #[tauri::command]
@@ -1551,11 +1614,6 @@ fn move_index_folder(app: &AppHandle, shell: &Arc<Shell>, target: PathBuf) -> Re
             }
         }
     }
-    struct Busy<'a>(&'a AtomicBool);
-    impl Drop for Busy<'_> {
-        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
-    }
-
     let mut restore = RestoreWatchers(None);
     // A helper start and this move take turns: neither can put a database in the copy's way.
     let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
@@ -1793,9 +1851,9 @@ fn apply_model_folder(app: &AppHandle, shell: &Arc<Shell>, target: &Path, action
 
 /// Picks the folder a ready index is in (none when the picker is cancelled).
 #[tauri::command]
-async fn pick_index_folder(app: AppHandle) -> Option<String> {
+async fn pick_index_folder(window: tauri::WebviewWindow, app: AppHandle) -> Option<String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().set_title("Choose the Index Folder").pick_folder(move |folder| {
+    app.dialog().file().set_parent(&window).set_title("Choose the Index Folder").pick_folder(move |folder| {
         let _ = sender.send(folder);
     });
     receiver.await.ok().flatten().and_then(|folder| folder.into_path().ok())
@@ -1806,7 +1864,30 @@ async fn pick_index_folder(app: AppHandle) -> Option<String> {
 /// point at it from their next start; nothing is copied and nothing is indexed.
 #[tauri::command]
 fn setup_index_use(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: String) -> Result<Value, String> {
+    use_index_folder(&app, &shell.inner().clone(), &folder)
+}
+
+/// Settings → Storage → Use Existing Index…: the index in that folder — the person's own, from an older install or
+/// another copy of DigUp Plus — is used where it is. Nothing is copied, and the helpers come back on it at once, so
+/// search and indexing work on it from now on (an empty folder keeps a new index instead). The two `stop()` waits run
+/// off the window's thread, so the settings stay responsive while they run.
+#[tauri::command]
+async fn index_folder_use(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: String) -> Result<Value, String> {
     let shell = shell.inner().clone();
+    let worker = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || use_index_folder(&worker, &shell, &folder))
+        .await
+        .map_err(|error| format!("the index switch stopped: {error}"))??;
+    apply_folders(&app);   // the helpers start again on the folder that was just chosen
+    Ok(result)
+}
+
+/// The index in `folder` becomes the one DigUp Plus uses: one transaction under `index_move`, the same lock a move
+/// holds for its whole copy. A move and this switch take turns, so neither stops the helpers or saves while the other
+/// is mid-way, and a helper start (which checks the flag) can't come back on the old folder in between. The choice is
+/// validated before anything stops, and a failed save leaves the previous folder in place; nothing is copied, and a
+/// folder without an index in it starts a new one.
+fn use_index_folder(app: &AppHandle, shell: &Arc<Shell>, folder: &str) -> Result<Value, String> {
     if shell.options.index.is_some() {
         return Err("This run was started with --index; restart DigUp Plus without it to choose the index.".into());
     }
@@ -1826,16 +1907,34 @@ fn setup_index_use(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: String)
                 .into());
         }
     }
-    if shell.measuring.load(Ordering::SeqCst) {
-        return Err("The speed check is running; try again in a few seconds.".into());
+    // The check runs before anything stops: a foreign, truncated or newer index is refused while the old one is
+    // still in use, and the error is the helper's own words rather than a search that fails later.
+    if existing {
+        if let Err(error) = index_opens(shell, &target) {
+            return Err(format!("The index in that folder didn't open: {error}"));
+        }
     }
-    // The running helpers have the old folder open: the next ones get this one (search_launch/index_launch read it).
+    let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
+    if shell.index_busy.swap(true, Ordering::SeqCst) {
+        return Err("The index is already being moved.".into());
+    }
+    let _busy = Busy(&shell.index_busy);
+    // No waiting for the speed check: this only writes a path, and it may run for minutes (it waits for folder
+    // estimates and for the machine to be quiet). The helpers are stopped here; the next ones read the new path.
     shell.index.stop();
     shell.search.stop();
-    {
+    let saved = {
         let mut settings = shell.settings.lock().unwrap();
+        let previous = settings.index_folder.clone();
         settings.index_folder = Some(target.display().to_string());
-        settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+        let saved = settings.save(&shell.settings_path);
+        if saved.is_err() {
+            settings.index_folder = previous;   // the file and the memory must agree: the next helper reads the file
+        }
+        saved
+    };
+    if let Err(error) = saved {
+        return Err(format!("can't save the settings: {error}"));
     }
     shell.search.set_launch(shell.search_launch());
     let _ = app.asset_protocol_scope().allow_directory(target.join("previews"), false);
@@ -1844,9 +1943,9 @@ fn setup_index_use(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: String)
 
 /// Picks the folder the model should live in (none when the picker is cancelled).
 #[tauri::command]
-async fn pick_model_folder(app: AppHandle) -> Option<String> {
+async fn pick_model_folder(window: tauri::WebviewWindow, app: AppHandle) -> Option<String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().set_title("Choose the Model Folder").pick_folder(move |folder| {
+    app.dialog().file().set_parent(&window).set_title("Choose the Model Folder").pick_folder(move |folder| {
         let _ = sender.send(folder);
     });
     receiver.await.ok().flatten().and_then(|folder| folder.into_path().ok())
@@ -1855,9 +1954,9 @@ async fn pick_model_folder(app: AppHandle) -> Option<String> {
 
 /// Picks the two model files from a folder or two (none when the picker is cancelled).
 #[tauri::command]
-async fn pick_model_files(app: AppHandle) -> Vec<String> {
+async fn pick_model_files(window: tauri::WebviewWindow, app: AppHandle) -> Vec<String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().set_title("Use Model Files")
+    app.dialog().file().set_parent(&window).set_title("Use Model Files")
         .add_filter("GGUF model files", &["gguf"])
         .pick_files(move |files| {
             let _ = sender.send(files);
@@ -1884,6 +1983,11 @@ fn model_folder_plan(shell: State<'_, Arc<Shell>>, target: String) -> Value {
         "free": plan.free,
         "problem": plan.problem,
         "canDownload": plan.can_download,
+        // What each expected file is like in that folder: a name that's there but a size that isn't says exactly which
+        // file isn't the one DigUp Plus downloads (the check is by name and size, never by hash, before download).
+        "files": models::files(&target).iter().map(|file| json!({
+            "name": file.name, "present": file.present, "bytes": file.size, "expected": file.bytes,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -2107,6 +2211,22 @@ fn model_manifest(shell: State<'_, Arc<Shell>>) -> Result<Value, String> {
     models::manifest(shell.launch(vec!["model-manifest".to_string()], "model.log"))
 }
 
+/// A yes/no question in the system's dialog (setup asks before downloading 865 MB). True when the first button was
+/// pressed.
+#[tauri::command]
+async fn ask_confirm(window: tauri::WebviewWindow, app: AppHandle, title: String, message: String, yes: String)
+    -> bool {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(message)
+        .parent(&window)
+        .title(title)
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(yes, "Cancel".into()))
+        .show(move |answered| { let _ = sender.send(answered); });
+    receiver.await.unwrap_or(false)
+}
+
 /// Setup's model step, Download: the chosen folder (None: the default or an older install's folder) becomes the model
 /// folder, and the download starts there. Nothing is made or fetched before this call.
 #[tauri::command]
@@ -2116,10 +2236,10 @@ fn setup_model_download(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: Op
         .map(|folder| models::chosen_folder(&PathBuf::from(folder)))
         .unwrap_or_else(|| shell.models_folder());
     match models::folder_state(&target, None) {
-        models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder => {
+        models::FolderState::Unavailable | models::FolderState::NotFolder => {
             return Err(format!("That model folder can't be used: {}", target.display()));
         }
-        models::FolderState::Available | models::FolderState::Missing => {}
+        models::FolderState::Available | models::FolderState::Missing | models::FolderState::WrongVolume => {}
     }
     if shell.options.models.is_none() {
         {
@@ -2150,10 +2270,10 @@ async fn setup_model_use(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: S
         return Err(format!("The two model files aren't both in {}.", target.display()));
     }
     match models::folder_state(&target, None) {
-        models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder => {
+        models::FolderState::Unavailable | models::FolderState::NotFolder => {
             return Err(format!("That model folder can't be used: {}", target.display()));
         }
-        models::FolderState::Available | models::FolderState::Missing => {}
+        models::FolderState::Available | models::FolderState::Missing | models::FolderState::WrongVolume => {}
     }
     shell.begin_models(false)?;
     // Hashing both files takes a while: it runs off the window's thread, so the page stays responsive.

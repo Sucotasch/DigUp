@@ -25,10 +25,13 @@ let estimatesStarted = false;
 let codeEstimatesStarted = false;
 let info = { offered: [], chosen: [], skipped: [], hotkey: "", model: { state: "checking" }, state: {}, auto: false };
 let modelTarget = null;       // the folder the model step will download to; null: the default/older folder
+let clickingThrough = false;   // a --debug-setup run clicks through: nothing asks, nothing waits
 let modelMessage = "";        // what the model step says after a choice (an error, or where files were found)
 let modelProblem = false;
 let setupIndex = null;        // the index folder chosen on the model step; null: the default
 let setupIndexMessage = "";   // what the index part of the model step says after a choice
+let setupIndexProblem = false;
+let skippedIndexing = false;   // "Skip Indexing for Now": nothing was chosen, so the last step says so
 const codeMode = new URLSearchParams(location.search).has("code");
 
 // MARK: Paths
@@ -377,6 +380,8 @@ function render() {
     : PAGES[page] === "folders" && selection.chosen.length ? "Start indexing" : "Continue";
   $("next").disabled = PAGES[page] === "folders" && !selection.folders().length;
   $("model-status").hidden = codeMode || page === 0 || page === PAGES.length - 1;
+  $("model-skip").hidden = PAGES[page] !== "model";
+  $("skip-indexing").hidden = !firstTime || PAGES[page] !== "folders";
   renderFooter();
   if (PAGES[page] === "model") renderModel();
   if (PAGES[page] === "ready") renderProgress();
@@ -395,7 +400,8 @@ function renderFooter() {
   $("next").disabled = PAGES[page] === "folders" && !selection.folders().length;
   let summary = "";
   if (PAGES[page] === "folders") {
-    if (!selection.folders().length) summary = "Choose at least one folder";
+    if (!selection.folders().length) summary = firstTime ? "Choose at least one folder, or skip indexing for now"
+                                                       : "Choose at least one folder";
     else if (estimating > 0 || rows.some((row) => selection.isSearched(row) && !estimates.has(key(row)))) summary = "Looking at your folders…";
     // Turning code search on: what reading the code takes, and its index.
     else if (codeMode && !info.chosen.length) {
@@ -424,6 +430,27 @@ function modelNote(text, problem = true) {
   if (PAGES[page] === "model") renderModel();
 }
 
+/// What a chosen model folder means: both files there → take them in place (checking they are the ones DigUp Plus
+/// downloads); anything else → say exactly which file isn't the one expected. A folder with one file, or with files of
+/// another size, used to look the same as an empty one, and the next click quietly started an 865 MB download there.
+async function applyModelPlan(plan) {
+  modelTarget = plan.target;
+  modelMessage = "";
+  if (plan.kind === "use") {
+    modelNote("Checking the model files…", false);
+    await invoke("setup_model_use", { folder: plan.target });
+    modelNote("The model files are in this folder.", false);
+    return;
+  }
+  const wrong = (plan.files || []).map((file) => {
+    if (!file.present) return `${file.name}: not in this folder`;
+    if (file.bytes !== file.expected) return `${file.name}: ${sizeText(file.bytes)}, expected ${sizeText(file.expected)}`;
+    return null;
+  }).filter(Boolean);
+  modelNote(`Not the model files DigUp Plus downloads (${wrong.join("; ")}). Point at the folder that has them, or `
+    + `download them into ${native(plan.target)}.`, true);
+}
+
 /// Where the model step will put the model, and what's there now. Nothing has been downloaded before Download.
 function renderModel() {
   const storage = info.storage || {};
@@ -434,7 +461,7 @@ function renderModel() {
   $("setup-index-path").textContent = index ? native(index) : "";
   $("setup-index-note").hidden = !setupIndexMessage;
   $("setup-index-note").textContent = setupIndexMessage;
-  $("setup-index-note").className = "progress-note" + (setupIndexMessage ? " problem" : "");
+  $("setup-index-note").className = "progress-note" + (setupIndexProblem ? " problem" : "");
   let note = modelMessage;
   let problem = modelMessage ? modelProblem : false;
   if (!note) {
@@ -472,74 +499,63 @@ function renderModel() {
     const downloading = model.state === "downloading" || model.state === "waiting";
     $("next").textContent = downloading ? "Downloading…" : model.state === "ready" ? "Continue" : "Download Model";
     $("next").disabled = downloading;
+    $("model-skip").hidden = model.state === "ready";   // the files are here: nothing to skip
   }
 }
 
 $("model-change").addEventListener("click", async () => {
   const picked = await invoke("pick_model_folder");
   if (!picked) return;
+  $("model-change").disabled = true;
   try {
     const plan = await invoke("model_folder_plan", { target: picked });
     if (plan.kind === "invalid") {
       modelNote(plan.problem || "That folder can't be used.");
       return;
     }
-    modelTarget = plan.target;
-    modelMessage = "";
-    if (plan.kind === "use") {
-      modelNote("Both model files are in this folder. Download will use them; Use Existing Folder… checks them first.", false);
-    } else {
-      modelNote(`The model will be downloaded to ${native(plan.target)}.`, false);
-    }
-    renderModel();
-  } catch (error) {
-    modelNote(String(error));
-  }
-});
-
-$("model-use").addEventListener("click", async () => {
-  const picked = await invoke("pick_model_folder");
-  if (!picked) return;
-  $("model-use").disabled = true;
-  try {
-    const plan = await invoke("model_folder_plan", { target: picked });
-    if (plan.kind !== "use") {
-      if (plan.kind !== "invalid") {
-        modelTarget = plan.target;
-        modelMessage = "";
-      }
-      modelNote(plan.problem || "The two model files aren't both in that folder. Choose the folder that has them, or download the model.");
-      return;
-    }
-    modelTarget = plan.target;
-    modelMessage = "";
-    modelNote("Checking the model files…", false);
-    await invoke("setup_model_use", { folder: plan.target });
-    page += 1;
-    render();
+    await applyModelPlan(plan);
   } catch (error) {
     modelNote(String(error));
   } finally {
-    $("model-use").disabled = false;
+    $("model-change").disabled = false;
+    renderModel();
   }
 });
 
-$("index-use").addEventListener("click", async () => {
+$("index-change").addEventListener("click", async () => {
   const picked = await invoke("pick_index_folder");
   if (!picked) return;
-  $("index-use").disabled = true;
+  $("index-change").disabled = true;
   try {
     const result = await invoke("setup_index_use", { folder: picked });
     setupIndex = result.index;
     setupIndexMessage = result.existing
       ? "Using the index in that folder. Nothing was copied."
       : "A new index will be kept in that folder.";
+    setupIndexProblem = false;
   } catch (error) {
     setupIndexMessage = String(error);
+    setupIndexProblem = true;
   } finally {
-    $("index-use").disabled = false;
+    $("index-change").disabled = false;
     renderModel();
   }
+});
+
+$("skip-indexing").addEventListener("click", async () => {
+  $("skip-indexing").disabled = true;
+  try {
+    // Nothing is indexed for now: no folders saved, nothing read. Settings → Folders adds them whenever the person is
+    // ready (the model still downloads in the background if it isn't in yet).
+    await invoke("apply_setup_folders", { folders: [], skipped: [] });
+  } catch (error) {
+    $("summary").textContent = String(error);
+    $("skip-indexing").disabled = false;
+    return;
+  }
+  skippedIndexing = true;
+  page += 1;
+  render();
 });
 
 $("model-skip").addEventListener("click", async () => {
@@ -558,14 +574,28 @@ $("model-skip").addEventListener("click", async () => {
 $("next").addEventListener("click", async () => {
   const name = PAGES[page];
   if (name === "model") {
-    $("next").disabled = true;
-    modelMessage = "";
-    try {
-      await invoke("setup_model_download", { folder: modelTarget });
-    } catch (error) {
-      modelNote(String(error));
-      $("next").disabled = false;
-      return;
+    const model = progress.model || info.model || {};
+    // The files are there already (an older folder, or one just taken in place): nothing to fetch.
+    if (model.state !== "ready") {
+      if (!clickingThrough) {
+        // 865 MB, and the folder may be the wrong one: ask before fetching anything.
+        const folder = modelTarget || (info.storage || {}).models || "";
+        const yes = await invoke("ask_confirm", {
+          title: "Download the model?",
+          message: `DigUp Plus downloads the model (865 MB) into ${native(folder)}. Continue?`,
+          yes: "Download",
+        });
+        if (!yes) return;
+      }
+      $("next").disabled = true;
+      modelMessage = "";
+      try {
+        await invoke("setup_model_download", { folder: modelTarget });
+      } catch (error) {
+        modelNote(String(error));
+        $("next").disabled = false;
+        return;
+      }
     }
     page += 1;
     render();
@@ -625,6 +655,7 @@ $("back").addEventListener("click", () => {
 
 /// Debug runs (--debug-setup): every offered folder, every page, then Done.
 async function clickThrough() {
+  clickingThrough = true;   // a debug run: the download question has no one to answer it
   while (page < PAGES.length - 1) {
     $("next").click();
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -680,6 +711,10 @@ function renderProgress() {
     const later = selectionPart().later, pace = progress.pace || 1;
     time = `${Math.floor(fraction * 100)}%` + (later > 0 ? ` · ${leftText(later * (1 - fraction) * pace)}` : "");
     note = "Everything is searchable; long PDFs and documents are being read past their first pages.";
+  } else if (skippedIndexing) {
+    label = "Nothing is indexed yet";
+    done = true;
+    note = "Settings → Folders adds the folders to read whenever you're ready.";
   } else if (state.activity === "idle" || (state.activity === "starting" && state.searchable > 0 && !state.pending)) {
     label = state.searchable ? `${state.searchable.toLocaleString()} ${state.searchable === 1 ? "file" : "files"} indexed` : "Up to date";
     done = true;
@@ -727,6 +762,10 @@ function timeLeft() {
   if (sure && doneWork > 0) progress.pace = Math.max(0.05, Math.min(500, elapsed / doneWork));
   if (!sure && !calibrated) return null;
   return remaining * (sure ? progress.pace : 1);
+}
+
+function sizeText(value) {
+  return value >= 1e9 ? `${(value / 1e9).toFixed(2)} GB` : `${Math.round(value / 1e6)} MB`;
 }
 
 function leftText(seconds) {
@@ -835,16 +874,9 @@ function element(tag, className, text) {
 async function start() {
   info = await invoke(codeMode ? "code_setup_info" : "setup_info");
   firstTime = !info.setUp;
-  // A first launch chooses about the model before any of it downloads: where it goes, an older copy to reuse, or
-  // no model yet. A computer that has it already goes straight on.
-  const needsModel = firstTime && !codeMode && info.model?.state !== "ready";
-  if (firstTime && info.codeOffered?.length) {
-    PAGES = needsModel
-      ? ["welcome", "model", "folders", "code", "shortcut", "ready"]
-      : ["welcome", "folders", "code", "shortcut", "ready"];
-  } else if (needsModel) {
-    PAGES = ["welcome", "model", "folders", "shortcut", "ready"];
-  }
+  // A first launch always asks about the model and the index: where each goes, the index it already has, the files it
+  // already has, or none for now. A computer that has both goes straight on anyway (the step says so, and the folders
+  // can still be changed there).
   if (codeMode) {
     $("folders").querySelector("h2").textContent = "Which code should DigUp Plus search?";
     $("folders-subtitle").textContent = "Pick the folders with your code, and open one to leave out some of its "
@@ -852,16 +884,12 @@ async function start() {
       + "code shows up only when you search for code.";
   }
   progress.state = info.state || {};
-  // The usual folders, then any chosen before (a chosen subfolder of a folder listed shows inside it). On a first
-  // launch they start checked, all but Downloads (much of what lands there is passing through).
+  // The usual folders, then any chosen before (a chosen subfolder of a folder listed shows inside it). Nothing is
+  // chosen for the person: they pick what to index, or skip it for now (a debug run takes everything).
   for (const path of info.offered) addRow(path);
   for (const path of info.chosen) if (!rows.some((row) => same(row, path) || same(row, parentOf(path)))) addRow(path);
-  if (firstTime && !info.chosen.length) {
-    selection.chosen = info.offered.filter((path) => info.auto || !/[\\/]Downloads$/i.test(path)).map(canon);
-  } else {
-    selection.chosen = info.chosen.map(canon);
-    selection.skipped = (info.skipped || []).map(canon);
-  }
+  selection.chosen = info.auto ? info.offered.map(canon) : info.chosen.map(canon);
+  selection.skipped = (info.skipped || []).map(canon);
   // A folder with some of its subfolders chosen or skipped starts open, so it shows which.
   for (const row of rows) {
     if ([...selection.chosen, ...selection.skipped].some((path) => same(parentOf(path), row))) open.add(key(row));

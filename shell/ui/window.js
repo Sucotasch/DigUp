@@ -50,7 +50,7 @@ const COUNTED = { screenshot: ["screenshot", "screenshots"], image: ["image", "i
 const SEARCH_ICON = '<svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.5"/><path d="M15 15 L20.5 20.5"/></svg>';
 
 const $ = (id) => document.getElementById(id);
-const $query = $("query"), $content = $("content"), $side = $("side"), $kinds = $("kinds"), $menu = $("menu");
+const $query = $("query"), $content = $("content"), $side = $("side"), $splitter = $("splitter"), $kinds = $("kinds"), $menu = $("menu");
 const $batch = $("batch"), $batchSummary = $("batch-summary"), $batchToggle = $("batch-toggle");
 const $modal = $("modal"), $report = $("report");
 const $announce = $("announce"), $more = $("more-results"), $moreCount = $("more-count");
@@ -176,6 +176,10 @@ function run() {
       // The chips count the whole query; a helper too old to send its kind totals falls back to this first page.
       const strong = all.hits.slice(0, all.strong);
       const counts = countsOfReply(all, strong);
+      // A rerun of the same query (the index moved under the list) keeps the person on the file they were on; a
+      // new query starts at the top.
+      const sameQuery = text === state.text;
+      const previous = state.selection;
       const visible = [], weak = [];
       for (const hit of shown.hits) (tierOf(hit, layered ? cutoffs : null) === "visible" ? visible : weak).push(hit);
       const layers = layered && tiers != null;
@@ -195,6 +199,9 @@ function run() {
                              matchesGeneration: shown.generation ?? null, loadingMore: false, pageError: null });
       if (!rows().some((hit) => hit.path === state.selection)) state.selection = rows()[0]?.path ?? null;
       render();
+      if (sameQuery && previous && state.selection === previous) {
+        $content.querySelector(`[data-path="${CSS.escape(previous)}"]`)?.scrollIntoView({ block: "center" });
+      }
       if (debugPending) report();
     } catch (error) {
       if (generation !== state.generation) return;
@@ -976,6 +983,10 @@ function codeRow(hit, weaker) {
 /// A result's clicks: one selects it, two open it, the other button offers what to do with the file. The field keeps
 /// the keyboard (as on the Mac: ← → move the selection once you've picked a result).
 function wire(item, hit) {
+  // The keyboard stays with the results after a click, as in a file manager: Del and the F-keys work right away, and
+  // the arrows, Space and Enter are answered at the document level, which never looks at the focus. Out of the Tab
+  // order (the field is reached by Tab, Ctrl+F or a click).
+  item.tabIndex = -1;
   // Dragged out of the window, the file goes along (to a file manager, a mail, a chat). On Linux, WebKit's own drag with
   // the file's address: GTK starts it from the press, as Wayland wants (a drag started later is refused).
   if (isLinux) {
@@ -1004,7 +1015,7 @@ function wire(item, hit) {
     window.addEventListener("mousemove", moved);
     window.addEventListener("mouseup", done);
   };
-  item.onclick = (event) => pick(hit, event);
+  item.onclick = (event) => { item.focus({ preventScroll: true }); pick(hit, event); };
   item.ondblclick = () => open(hit);
   item.oncontextmenu = (event) => {
     event.preventDefault();
@@ -1038,6 +1049,12 @@ function select(path) {
   state.navigated = true;
   for (const item of $content.querySelectorAll("[data-path]")) item.classList.toggle("selected", item.dataset.path === path);
   syncActiveDescendant();
+  // With the keyboard already on the results (Tab, a click, an arrow), the focus follows the cursor, so Del and the
+  // F-keys always name the highlighted file.
+  const active = document.activeElement;
+  if (active instanceof Element && active.closest("[data-path]")) {
+    $content.querySelector(`[data-path="${CSS.escape(path)}"]`)?.focus({ preventScroll: true });
+  }
   $content.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
   renderSide();
   if (!$big.hidden) renderBig();
@@ -1088,6 +1105,25 @@ function operable() {
 function selectedHits() {
   const byPath = new Map(operable().map((hit) => [hit.path, hit]));
   return [...state.selected].map((path) => byPath.get(path)).filter(Boolean);
+}
+
+/// What Delete works on: the ticked files, or — when nothing is ticked — the one under the cursor, as file managers do.
+function deletableHits() {
+  const hits = selectedHits();
+  if (hits.length) return hits;
+  const hit = selectedHit();
+  return hit && isWindows && MEDIA.has(hit.kind) ? [hit] : [];
+}
+
+/// Puts the keyboard on the results, at the active file (the first one when there is none yet). False when there are
+/// no results to point at.
+function focusActiveRow() {
+  if (!rows().length) return false;
+  if (!state.selection) select(rows()[0].path);
+  const row = $content.querySelector(`[data-path="${CSS.escape(state.selection)}"]`);
+  if (!row) return false;
+  row.focus({ preventScroll: true });
+  return true;
 }
 
 function selectedSize(hits) {
@@ -1313,7 +1349,7 @@ async function moveOrCopy(kind) {
 
 /// Delete: to the Recycle Bin, with this sheet in between unless Settings turned the question off.
 async function confirmDelete() {
-  const files = selectedHits();
+  const files = deletableHits();
   if (!isWindows || !files.length || state.busy || !$modal.hidden || choosing) return;
   choosing = true;
   try {
@@ -1324,11 +1360,12 @@ async function confirmDelete() {
     const box = element("div", "modal-box");
     box.append(element("h2", "", `Move ${files.length === 1 ? "this file" : `${files.length} files`} to the Recycle Bin?`));
     box.append(element("p", "", `${bytes(selectedSize(files))}. You can put ${files.length === 1 ? "it" : "them"} back `
-      + `from the Recycle Bin.`));
+      + `from the Recycle Bin. A file too large for it may be deleted for good instead; Windows asks before that.`));
     const actions = element("div", "modal-actions");
     const cancel = element("button", "", "Cancel");
     cancel.onclick = closeModal;
     const go = element("button", "danger", "Move to Recycle Bin");
+    go.setAttribute("data-default", "");   // Enter confirms: the Recycle Bin is reversible
     go.onclick = () => operate("delete", null, files);
     actions.append(cancel, go);
     box.append(actions);
@@ -1363,6 +1400,7 @@ function confirmPermanent(files) {
   box.append(element("p", "", "Permanent deletion cannot be undone. The full list stays in the report below."));
   const actions = element("div", "modal-actions");
   const keep = element("button", "", "Keep Files");
+  keep.setAttribute("data-default", "");   // the safe way out stays Enter's: this deletion cannot be undone
   keep.onclick = closeModal;
   const go = element("button", "danger", `Delete ${countOf(files.length, "file")} Permanently`);
   go.onclick = () => operate("delete_permanent", null,
@@ -1479,7 +1517,7 @@ function operationNote(report) {
     : report.kind === "delete_permanent" ? "Permanently deleted" : "Moved";
   let text = report.cancelled ? `Stopped: ${verb.toLowerCase()} ${report.done} of ${report.total}`
     : `${verb} ${countOf(report.done, "file")}`;
-  if (report.kind === "delete") text += " to the Recycle Bin";
+  if (report.kind === "delete") text += " to the Recycle Bin (or for good, if one was too large for it)";
   if (report.renamed) text += ` · ${report.renamed} renamed`;
   if (report.failed) text += ` · ${report.failed} failed`;
   if (report.skipped) text += ` · ${report.skipped} skipped`;
@@ -1609,6 +1647,10 @@ function forget(paths, stay = []) {
   renderBatch();
   renderPagination();
   if (!$big.hidden) renderBig();
+  // The operation's own reload bumped the engine's generation. The totals and the offset above are already corrected
+  // by exactly this operation's rows, and the next page's `seen` keeps it from repeating any: so the next page
+  // accepts the new generation instead of restarting the whole query and throwing the person back to the first page.
+  state.matchesGeneration = null;
 }
 
 /// For a moment after an operation, the status bar's right side says what happened.
@@ -1644,7 +1686,10 @@ function showModal(box) {
   if (title) title.id = "modal-title";
   $modal.replaceChildren(box);
   $modal.hidden = false;
-  box.querySelector("button.primary, button.danger, button")?.focus({ preventScroll: true });
+  // The keyboard lands on the sheet's intended button (marked `data-default`, or the primary one), not on the first
+  // in the row: Enter then confirms the action the sheet is about, Escape always puts it away.
+  (box.querySelector("button.primary") ?? box.querySelector("[data-default]") ?? box.querySelector("button"))
+    ?.focus({ preventScroll: true });
 }
 
 function hideModal() {
@@ -1653,10 +1698,15 @@ function hideModal() {
   $modal.hidden = true;
   $modal.replaceChildren();
   state.sheet = false;
-  // Once the caller has put the report back: its button may have been replaced under the sheet.
+  // Once the caller has put the report back: its button may have been replaced under the sheet. A gone control
+  // means the operation rebuilt the list — the keyboard stays with the results (Del works again), and only with
+  // nothing to point at does it go back to the field.
   requestAnimationFrame(() => {
     if (back?.isConnected) back.focus({ preventScroll: true });
-    else $query.focus();
+    else {
+      const row = state.selection && $content.querySelector(`[data-path="${CSS.escape(state.selection)}"]`);
+      (row ?? $query).focus({ preventScroll: true });
+    }
   });
 }
 
@@ -1815,6 +1865,7 @@ function renderSide() {
   const shown = state.hasResults && !state.codePhase && state.query.trim();
   const hit = shown ? selectedHit() : null;
   $side.hidden = !state.showsPreview || !hit;
+  $splitter.hidden = $side.hidden;
   $side.replaceChildren();
   if (!hit) return;
   $side.append(previewPicture(hit), facts(hit));
@@ -2379,6 +2430,22 @@ document.addEventListener("keydown", (event) => {
     }
   }
   switch (event.key) {
+    case "Tab": {
+      // The two domains the keyboard lives in — the field and the results — and Tab (either direction) is the switch
+      // between them. Nothing moves the focus on its own; every other control keeps its natural Tab order.
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (!$menu.hidden) hideMenu();
+      const at = document.activeElement;
+      const onRow = at instanceof Element && at.closest("[data-path]");
+      if (at === $query) {
+        if (!focusActiveRow()) return;   // no results to point at: the natural order
+        event.preventDefault();
+      } else if (onRow) {
+        event.preventDefault();
+        $query.focus();
+      }
+      return;
+    }
     case " ":
       // After the arrows or a click: the big preview. While typing: a space.
       if (!plain || !(state.navigated || !$big.hidden) || !state.hasResults || !state.query.trim() || !selectedHit()) return;
@@ -2408,9 +2475,10 @@ document.addEventListener("keydown", (event) => {
       return;
     }
     case "Delete":
-      // Only outside the field: there it deletes text.
-      if (!isWindows || document.activeElement === $query || !selectedHits().length) return;
+      // Only outside the field: there it deletes text. Nothing ticked: the file under the cursor, as file managers do.
+      if (!isWindows || document.activeElement === $query) return;
       event.preventDefault();
+      if (!deletableHits().length) return;
       confirmDelete();
       return;
     case "F5":
@@ -2419,10 +2487,14 @@ document.addEventListener("keydown", (event) => {
       // Taken even with nothing chosen: the web view must not reload the window on them.
       if (!isWindows) return;
       event.preventDefault();
-      if (!selectedHits().length) return;
-      if (event.key === "F5") moveOrCopy("copy");
-      else if (event.key === "F6") moveOrCopy("move");
-      else confirmDelete();
+      if (event.key === "F8") {
+        if (!deletableHits().length) return;
+        confirmDelete();
+      } else {
+        if (!selectedHits().length) return;
+        if (event.key === "F5") moveOrCopy("copy");
+        else moveOrCopy("move");
+      }
       return;
     case "ArrowLeft":
     case "ArrowRight":
@@ -2455,11 +2527,6 @@ document.addEventListener("keydown", (event) => {
       event.preventDefault();
       setQuery("");
       return;
-  }
-  // Typing anywhere goes to the field.
-  if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey
-      && document.activeElement !== $query && !window.getSelection()?.toString()) {
-    $query.focus();
   }
 });
 
@@ -2507,6 +2574,42 @@ window.addEventListener("resize", () => {
   clearTimeout(sizeTimer);
   sizeTimer = setTimeout(reportSize, 300);
 });
+
+// The preview pane's width: drag its divider, or focus it and use the arrows. The width is remembered the way the
+// window's size is (`preview_resized`; the shell keeps it with the window's place and hands it back on the next
+// start), and the picture's proportions are the stylesheet's business (`object-fit: contain`).
+const SIDE_MIN = 200, SIDE_MAX = 600;
+function setSideWidth(width) {
+  $side.style.width = `${Math.round(Math.min(SIDE_MAX, Math.max(SIDE_MIN, width)))}px`;
+  fitPreview();
+}
+let sideTimer = null;
+function reportSide() {
+  clearTimeout(sideTimer);
+  sideTimer = setTimeout(() => {
+    invoke("preview_resized", { width: $side.getBoundingClientRect().width }).catch(() => {});
+  }, 300);
+}
+$splitter.addEventListener("mousedown", (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();   // no text selection while dragging
+  const right = $side.getBoundingClientRect().right;
+  const move = (move) => setSideWidth(right - move.clientX);
+  const done = () => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", done);
+    reportSide();
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", done);
+});
+$splitter.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.stopPropagation();   // the results' arrow navigation must not move the selection meanwhile
+  event.preventDefault();
+  setSideWidth($side.getBoundingClientRect().width + (event.key === "ArrowRight" ? 16 : -16));
+  reportSide();
+});
 reportSize();
 
 /// What's indexed of each kind under the chosen folders (the home's counts), at most every two seconds while indexing.
@@ -2542,6 +2645,7 @@ async function start() {
     $("clear").hidden = !state.query;
   }
   updatePreviewButton();
+  if (info.previewWidth) setSideWidth(info.previewWidth);
   render();
   loadIndexed();
   $query.focus();

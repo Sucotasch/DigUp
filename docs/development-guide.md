@@ -171,11 +171,13 @@ shell\src-tauri\target\debug\digup-shell.exe --helper "$bin\digup.exe" `
 ### Portable — то, что форк выпускает (`scripts/package-portable.sh`)
 
 ```sh
-scripts/package-portable.sh        # → dist/DigUpPlus-<version>-windows-x64.zip
+scripts/package-portable.sh        # → shell/src-tauri/target/release/DigUpPlus.exe
 ```
 
-Скрипт собирает helper-папку так же, как установщик, затем `npx @tauri-apps/cli@2.12.2 build --no-bundle`, кладёт
-`digup-shell.exe` как `DigUp Plus.exe` рядом с `helper/` и `THIRD-PARTY-NOTICES.txt` и пакует zip через`Compress-Archive`, и пишет `portable.txt`. Ничего не устанавливается: распаковал — запустил. Благодаря `portable.txt`
+Скрипт собирает helper-папку так же, как установщик, затем `npx @tauri-apps/cli@2.12.2 build --no-bundle` и кладёт
+результат в `shell/src-tauri/target/release` — единственное место сборки: `DigUpPlus.exe` рядом с `helper/`,
+`THIRD-PARTY-NOTICES.txt` и `portable.txt` (старые имена exe убираются). Ничего не устанавливается: папку можно
+скопировать куда угодно и запустить. Благодаря `portable.txt`
 оболочка держит настройки, логи, индекс, модель и профиль WebView2 в папке `data` рядом с exe (см. §5), а не в
 `%APPDATA%`/`%LOCALAPPDATA%`; `--data <папка>` или `DIGUP_DATA` указывают другое место. Без `portable.txt` (установщик)
 всё по-прежнему в `%APPDATA%\com.sucotasch.digupplus` и `%LOCALAPPDATA%\DigUpPlus`.

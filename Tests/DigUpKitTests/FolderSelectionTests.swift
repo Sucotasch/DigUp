@@ -89,6 +89,18 @@ import Testing
         #expect(!FolderSelection(chosen: ["/a/b"]).isSearched("/a/bc/x"))
     }
 
+    @Test func windowsPathsCompareWithoutCase() {
+        #if os(Windows)
+        #expect(FolderSelection.isInside("c:/one/photos/a.jpg", "C:/One/Photos"))
+        #expect(FolderSelection(chosen: ["C:/One/Photos"]).isSearched("c:/one/photos/a.jpg"))
+        #expect(!FolderSelection(chosen: ["C:/One/Photos"], skipped: ["c:/one/photos/private"])
+            .isSearched("C:/One/Photos/Private/x.pdf"))
+        #else
+        // Elsewhere the comparison stays case-sensitive.
+        #expect(!FolderSelection.isInside("c:/one/photos/a.jpg", "C:/One/Photos"))
+        #endif
+    }
+
     @Test func crawlsLeaveSkipsOutButWalkChosenFoldersInsideThem() throws {
         let downloads = folder.appendingPathComponent("D")
         let courses = downloads.appendingPathComponent("Media/Courses")

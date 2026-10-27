@@ -247,17 +247,28 @@ private struct ModelFileError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// Replaces `final` with `partial`: the old file goes first (Windows won't rename over it); if that fails, the partial
-/// stays for the next try. A folder with the model's name is never removed: it may hold the person's own files.
+/// Replaces `final` with `partial` without a moment without a model: the old file steps aside (Windows won't rename
+/// over it), the partial takes its name, and only then the old one goes. A move that fails (a scanner or a backup
+/// holding the file) restores the old file, so the model is never the casualty. A folder with the model's name is
+/// never removed: it may hold the person's own files.
 private func install(_ partial: URL, as final: URL) throws {
     var isFolder: ObjCBool = false
-    if FileManager.default.fileExists(atPath: final.path, isDirectory: &isFolder) {
-        guard !isFolder.boolValue else {
-            throw ModelFileError("\(final.lastPathComponent) is a folder; move it out of the way and try again")
-        }
-        try FileManager.default.removeItem(at: final)
+    let exists = FileManager.default.fileExists(atPath: final.path, isDirectory: &isFolder)
+    guard !(exists && isFolder.boolValue) else {
+        throw ModelFileError("\(final.lastPathComponent) is a folder; move it out of the way and try again")
     }
-    try FileManager.default.moveItem(at: partial, to: final)
+    let old = final.appendingPathExtension("old")
+    try? FileManager.default.removeItem(at: old)   // one left behind by an interrupted install
+    if exists {
+        try FileManager.default.moveItem(at: final, to: old)
+    }
+    do {
+        try FileManager.default.moveItem(at: partial, to: final)
+    } catch {
+        if exists { try? FileManager.default.moveItem(at: old, to: final) }
+        throw error
+    }
+    try? FileManager.default.removeItem(at: old)
 }
 
 /// Copies a file in 8 MB pieces, saying how far it got at most five times a second.

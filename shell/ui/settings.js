@@ -434,6 +434,7 @@ function renderStorage() {
   for (const id of ["model-change", "model-files", "model-download", "model-delete", "model-cleanup-delete"]) {
     $(id).disabled = busy || downloading || measuring;
   }
+  $("index-use").disabled = indexBusy || measuring;
   $("model-check").disabled = busy || downloading;
   $("model-download").hidden = !(storage.modelRemoved || ["missing", "failed"].includes(model.state));
   $("model-delete").hidden = ["missing", "unavailable"].includes(model.state);
@@ -670,6 +671,35 @@ function closeIndexConfirm() {
   $("index-confirm").hidden = true;
 }
 
+/// Storage → Use Existing Index…: the index in the folder the person picks is used where it is (nothing is copied). The
+/// helpers stop and come back on it, so search and indexing use it from now on.
+async function useExistingIndex() {
+  try {
+    const picked = await invoke("pick_destination_folder", { title: "Choose the Folder with the Index" });
+    if (!picked) return;
+    indexBusy = true;
+    indexMessage = "Using the index in that folder…";
+    indexProblem = false;
+    renderStorage();
+    try {
+      const result = await invoke("index_folder_use", { folder: picked });
+      indexMessage = result.existing
+        ? `Using the index in ${shown(result.index)}. Nothing was copied.`
+        : `${shown(result.index)} is empty: a new index will be kept there.`;
+    } catch (error) {
+      indexMessage = String(error);
+      indexProblem = true;
+    }
+  } catch (error) {
+    indexMessage = String(error);
+    indexProblem = true;
+  } finally {
+    indexBusy = false;
+  }
+  await refresh().catch(() => {});
+  renderStorage();
+}
+
 async function changeIndexFolder() {
   try {
     const picked = await invoke("pick_destination_folder", { title: "Move the Index to…" });
@@ -715,6 +745,8 @@ async function moveIndex(target) {
   renderStorage();
 }
 
+$("index-use").onclick = () => useExistingIndex();
+$("done").onclick = () => invoke("close_window").catch(() => {});
 $("index-change").onclick = () => changeIndexFolder();
 $("index-confirm-cancel").onclick = () => closeIndexConfirm();
 $("index-confirm-go").onclick = () => {
