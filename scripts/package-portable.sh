@@ -60,5 +60,8 @@ mkdir -p "$folder"
 cp "$built" "$folder/$product.exe"
 cp -r "$helper" "$folder/helper"
 cp shell/src-tauri/THIRD-PARTY-NOTICES.txt "$folder/"
+# Says this copy is portable: the shell keeps settings, logs, index and model in `data` here (options.rs) instead of
+# %APPDATA% and %LOCALAPPDATA%. `--data <folder>` or DIGUP_DATA points them anywhere else.
+printf 'DigUp Plus keeps its settings, logs, index and model in the data folder beside this file.\n' > "$folder/portable.txt"
 (cd dist && powershell -NoProfile -Command "Compress-Archive -Path 'DigUpPlus-$version-windows-x64' -DestinationPath 'DigUpPlus-$version-windows-x64.zip' -Force")
 ls -la dist/

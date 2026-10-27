@@ -28,9 +28,9 @@
     </section>
 
     <section class="page" id="model" hidden>
-      <h2>Where should the model live?</h2>
-      <p class="subtitle">DigUp Plus needs its AI model (865 MB) once. Download it to the folder below, use files you
-        already have, or skip this for now and add it later in Settings.</p>
+      <h2>Where should the model and the index live?</h2>
+      <p class="subtitle">DigUp Plus needs its AI model (865 MB) once. Download it, use files you already have, or skip
+        this for now. An index you already have can be used in place: nothing is copied.</p>
       <div class="progress-card model-card">
         <div class="progress-line">
           <span class="progress-what">Model folder</span>
@@ -42,6 +42,17 @@
       <div class="model-actions">
         <button id="model-use">Use Existing Folder…</button>
         <button class="link" id="model-skip">Skip for Now</button>
+      </div>
+
+      <div class="progress-card model-card">
+        <div class="progress-line">
+          <span class="progress-what">Index</span>
+        </div>
+        <p class="progress-note path" id="setup-index-path"></p>
+        <p class="progress-note" id="setup-index-note" hidden></p>
+      </div>
+      <div class="model-actions">
+        <button id="index-use">Use Existing Index…</button>
       </div>
     </section>
 
@@ -101,7 +112,7 @@
   </main>
 
   <footer>
-    <span class="model" id="model"></span>
+    <span class="model" id="model-status"></span>
     <span class="summary" id="summary"></span>
     <span class="buttons">
       <button id="back" hidden>Back</button>

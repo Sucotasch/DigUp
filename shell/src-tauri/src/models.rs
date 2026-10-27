@@ -61,8 +61,19 @@ impl FileStatus {
     }
 }
 
-/// The app's data folder, as the engine spells it on each platform (`AppPaths`).
+/// A portable copy's own data folder, chosen once at start (`Options::data_root`): settings, logs, index and model all
+/// live under it instead of the system's folders.
+static DATA_FOLDER: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+pub fn use_data_folder(folder: Option<PathBuf>) {
+    let _ = DATA_FOLDER.set(folder);
+}
+
+/// The app's data folder, as the engine spells it on each platform (`AppPaths`), or this copy's own.
 pub fn data_folder() -> PathBuf {
+    if let Some(Some(folder)) = DATA_FOLDER.get() {
+        return folder.clone();
+    }
     #[cfg(windows)]
     {
         if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {

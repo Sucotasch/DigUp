@@ -451,6 +451,8 @@ function renderStorage() {
   $("model-note").className = "note" + (problem ? " problem" : "");
   $("index-size").textContent = bytes(storage.indexBytes || 0) + (storage.codeBytes ? ` (code ${bytes(storage.codeBytes)})` : "");
   pathButton($("index-path"), storage.index);
+  $("data-row").hidden = !storage.data;
+  pathButton($("data-path"), storage.data);
   $("index-change").disabled = indexBusy || measuring;
   $("index-note").hidden = !indexMessage;
   $("index-note").textContent = indexMessage;

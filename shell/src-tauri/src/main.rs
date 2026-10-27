@@ -794,6 +794,14 @@ fn main() {
     if options.toggle && hotkey::hand_over() {
         return;
     }
+    // A portable copy keeps WebView2's cache and profile in its data folder as well (the runtime reads this before a
+    // webview is made), so none of its own files land in %LOCALAPPDATA%.
+    if let Some(data) = options.data_root() {
+        let _ = std::fs::create_dir_all(&data);
+        if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", data.join("webview"));
+        }
+    }
     let app = tauri::Builder::default()
         // A second launch (DigUp opened again from the app grid or the Start menu) shows the window, as on the Mac; a
         // desktop shortcut's `--toggle` shows or hides the panel. The window is made once the second launch's message
@@ -830,7 +838,8 @@ fn main() {
             file_operation, cancel_file_operation, pick_destination_folder,
             pick_model_folder, pick_model_files, model_folder_plan, model_folder_apply, download_model,
             model_check, model_import, delete_model_files, delete_old_model_files, model_manifest,
-            setup_model_download, setup_model_use, setup_model_skip, index_folder_plan, move_index
+            setup_model_download, setup_model_use, setup_model_skip, setup_index_use, pick_index_folder,
+            index_folder_plan, move_index
         ])
         .build(tauri::generate_context!())
         .expect("DigUp couldn't start");
@@ -853,11 +862,19 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     app.set_activation_policy(tauri::ActivationPolicy::Accessory); // the menu bar only, no Dock icon
 
     let handle = app.handle().clone();
-    let logs = app.path().app_log_dir()?;
+    // A portable copy keeps its settings, logs, index and model in one folder of its own (options.rs, models.rs), never
+    // in %APPDATA% or %LOCALAPPDATA%.
+    let data_root = options.data_root();
+    models::use_data_folder(data_root.clone());
+    let logs = match &data_root {
+        Some(root) => root.join("logs"),
+        None => app.path().app_log_dir()?,
+    };
     std::fs::create_dir_all(&logs)?;
-    let settings_path = match &options.settings {
-        Some(path) => path.clone(),
-        None => app.path().app_config_dir()?.join("settings.json"),
+    let settings_path = match (&options.settings, &data_root) {
+        (Some(path), _) => path.clone(),
+        (None, Some(root)) => root.join("settings.json"),
+        (None, None) => app.path().app_config_dir()?.join("settings.json"),
     };
     let settings = Settings::load(&settings_path);
     let model_folder = models::resolve_models_folder(&options, &settings);
@@ -999,6 +1016,16 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     // has both files goes on as before, with no download. Later starts always go through `start_model`.
     if shell.is_set_up() || models::complete(&shell.models_folder()) {
         start_model(&handle, &shell);
+    } else {
+        // Setup is about to ask where the model goes: say what's there now. The field starts as "checking", and on a first
+        // launch no check runs, so the page would wait forever (and the note replaced its buttons: they share no id now).
+        let folder = shell.models_folder();
+        let state = match models::folder_state(&folder, shell.settings.lock().unwrap().models_volume) {
+            models::FolderState::Unavailable | models::FolderState::WrongVolume | models::FolderState::NotFolder =>
+                "unavailable",
+            _ => "missing",
+        };
+        set_model_state(&handle, &shell, json!({"state": state, "folder": folder.display().to_string()}));
     }
     if !shell.folders().is_empty() || !shell.code_folders().is_empty() {
         watch_folders(&handle);
@@ -1477,6 +1504,7 @@ fn storage(shell: &Shell) -> Value {
     };
     let mut storage = models::info(shell);
     storage["index"] = json!(index.as_ref().map(|folder| folder.display().to_string()));
+    storage["data"] = json!(shell.options.data_root().map(|folder| folder.display().to_string()));
     storage["indexBytes"] = json!(size("index.sqlite"));
     storage["codeBytes"] = json!(size("code.sqlite"));
     storage
@@ -1761,6 +1789,57 @@ fn apply_model_folder(app: &AppHandle, shell: &Arc<Shell>, target: &Path, action
         }
         _ => Err(format!("not a model folder action: {action}")),
     }
+}
+
+/// Picks the folder a ready index is in (none when the picker is cancelled).
+#[tauri::command]
+async fn pick_index_folder(app: AppHandle) -> Option<String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("Choose the Index Folder").pick_folder(move |folder| {
+        let _ = sender.send(folder);
+    });
+    receiver.await.ok().flatten().and_then(|folder| folder.into_path().ok())
+        .map(|path| path.display().to_string())
+}
+
+/// Setup: an index that's already there (or an empty folder to start a new one in). The choice is saved and the helpers
+/// point at it from their next start; nothing is copied and nothing is indexed.
+#[tauri::command]
+fn setup_index_use(app: AppHandle, shell: State<'_, Arc<Shell>>, folder: String) -> Result<Value, String> {
+    let shell = shell.inner().clone();
+    if shell.options.index.is_some() {
+        return Err("This run was started with --index; restart DigUp Plus without it to choose the index.".into());
+    }
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return Err("Choose the folder with the index.".into());
+    }
+    let target = PathBuf::from(folder);
+    if !target.is_dir() {
+        return Err("That folder doesn't exist.".into());
+    }
+    let existing = target.join("index.sqlite").is_file();
+    if !existing {
+        let empty = std::fs::read_dir(&target).map(|mut entries| entries.next().is_none()).unwrap_or(false);
+        if !empty {
+            return Err("That folder has no index.sqlite in it. Choose the folder DigUp Plus indexed into, or an empty one."
+                .into());
+        }
+    }
+    if shell.measuring.load(Ordering::SeqCst) {
+        return Err("The speed check is running; try again in a few seconds.".into());
+    }
+    // The running helpers have the old folder open: the next ones get this one (search_launch/index_launch read it).
+    shell.index.stop();
+    shell.search.stop();
+    {
+        let mut settings = shell.settings.lock().unwrap();
+        settings.index_folder = Some(target.display().to_string());
+        settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
+    }
+    shell.search.set_launch(shell.search_launch());
+    let _ = app.asset_protocol_scope().allow_directory(target.join("previews"), false);
+    Ok(json!({"index": target.display().to_string(), "existing": existing}))
 }
 
 /// Picks the folder the model should live in (none when the picker is cancelled).

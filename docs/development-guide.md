@@ -175,10 +175,10 @@ scripts/package-portable.sh        # → dist/DigUpPlus-<version>-windows-x64.zi
 ```
 
 Скрипт собирает helper-папку так же, как установщик, затем `npx @tauri-apps/cli@2.12.2 build --no-bundle`, кладёт
-`digup-shell.exe` как `DigUp Plus.exe` рядом с `helper/` и `THIRD-PARTY-NOTICES.txt` и пакует zip через
-`Compress-Archive`. Ничего не устанавливается: распаковал — запустил. Настройки и логи лежат в
-`%APPDATA%\com.sucotasch.digupplus`, индекс и модель — в `%LOCALAPPDATA%\DigUpPlus` (папка переименована из
-`DigUp`, чтобы не смешаться с установленным upstream-DigUp), поэтому папку сборки можно менять, не переиндексируя.
+`digup-shell.exe` как `DigUp Plus.exe` рядом с `helper/` и `THIRD-PARTY-NOTICES.txt` и пакует zip через`Compress-Archive`, и пишет `portable.txt`. Ничего не устанавливается: распаковал — запустил. Благодаря `portable.txt`
+оболочка держит настройки, логи, индекс, модель и профиль WebView2 в папке `data` рядом с exe (см. §5), а не в
+`%APPDATA%`/`%LOCALAPPDATA%`; `--data <папка>` или `DIGUP_DATA` указывают другое место. Без `portable.txt` (установщик)
+всё по-прежнему в `%APPDATA%\com.sucotasch.digupplus` и `%LOCALAPPDATA%\DigUpPlus`.
 
 ### Установщик (остался от upstream, `scripts/package-windows.sh`)
 
@@ -191,7 +191,7 @@ runtime, Swift runtime, C++ CRT, ffmpeg/ffprobe) → `scripts/notices.py` → `n
 --bundles nsis` с `helper/` и `THIRD-PARTY-NOTICES.txt` как resources.
 
 Выход: `shell/src-tauri/target/release/bundle/nsis/DigUp Plus_<version>_x64-setup.exe` (~440 МБ).
-Версия берётся из `shell/src-tauri/tauri.conf.json` (сейчас `0.1.0`), не из `Cargo.toml` (там `0.1.0` у пакета
+Версия берётся из `shell/src-tauri/tauri.conf.json` (сейчас `0.1.1`), не из `Cargo.toml` (там `0.1.0` у пакета
 оболочки, но имя файла и настройки идут от `tauri.conf.json`). Подписи и update-артефактов больше нет: `signing` из
 скрипта убран вместе с плагином updater.
 

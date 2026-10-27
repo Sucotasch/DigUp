@@ -27,6 +27,8 @@ let info = { offered: [], chosen: [], skipped: [], hotkey: "", model: { state: "
 let modelTarget = null;       // the folder the model step will download to; null: the default/older folder
 let modelMessage = "";        // what the model step says after a choice (an error, or where files were found)
 let modelProblem = false;
+let setupIndex = null;        // the index folder chosen on the model step; null: the default
+let setupIndexMessage = "";   // what the index part of the model step says after a choice
 const codeMode = new URLSearchParams(location.search).has("code");
 
 // MARK: Paths
@@ -374,7 +376,7 @@ function render() {
     : PAGES[page] === "model" ? "Download Model"
     : PAGES[page] === "folders" && selection.chosen.length ? "Start indexing" : "Continue";
   $("next").disabled = PAGES[page] === "folders" && !selection.folders().length;
-  $("model").hidden = codeMode || page === 0 || page === PAGES.length - 1;
+  $("model-status").hidden = codeMode || page === 0 || page === PAGES.length - 1;
   renderFooter();
   if (PAGES[page] === "model") renderModel();
   if (PAGES[page] === "ready") renderProgress();
@@ -428,6 +430,11 @@ function renderModel() {
   const model = progress.model || info.model || {};
   const path = modelTarget || storage.models || "";
   $("model-path").textContent = path ? native(path) : "";
+  const index = setupIndex || storage.index || "";
+  $("setup-index-path").textContent = index ? native(index) : "";
+  $("setup-index-note").hidden = !setupIndexMessage;
+  $("setup-index-note").textContent = setupIndexMessage;
+  $("setup-index-note").className = "progress-note" + (setupIndexMessage ? " problem" : "");
   let note = modelMessage;
   let problem = modelMessage ? modelProblem : false;
   if (!note) {
@@ -514,6 +521,24 @@ $("model-use").addEventListener("click", async () => {
     modelNote(String(error));
   } finally {
     $("model-use").disabled = false;
+  }
+});
+
+$("index-use").addEventListener("click", async () => {
+  const picked = await invoke("pick_index_folder");
+  if (!picked) return;
+  $("index-use").disabled = true;
+  try {
+    const result = await invoke("setup_index_use", { folder: picked });
+    setupIndex = result.index;
+    setupIndexMessage = result.existing
+      ? "Using the index in that folder. Nothing was copied."
+      : "A new index will be kept in that folder.";
+  } catch (error) {
+    setupIndexMessage = String(error);
+  } finally {
+    $("index-use").disabled = false;
+    renderModel();
   }
 });
 
@@ -751,7 +776,7 @@ function showModel(model) {
       : "Downloading the model…";
     if (model.problem) text += ` (${model.problem}, trying again)`;
   }
-  $("model").textContent = text;
+  $("model-status").textContent = text;
   if (PAGES[page] === "model") renderModel();
   if (PAGES[page] === "ready") renderProgress();
 }

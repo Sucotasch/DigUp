@@ -23,6 +23,9 @@ pub struct Options {
     pub hotkey: Option<String>,
     /// The settings file, instead of the one in the app's config folder (a fresh first launch in tests).
     pub settings: Option<PathBuf>,
+    /// Where this copy keeps everything (settings, logs, index and model), instead of the system's folders: a portable
+    /// build asks for `data` beside itself with a `portable.txt`, and `--data` (or DIGUP_DATA) points anywhere.
+    pub data: Option<PathBuf>,
     /// The folders setup offers, instead of the usual ones (Documents, Pictures…): dev runs never offer real folders.
     pub offered: Option<Vec<PathBuf>>,
     /// The folders with code that Settings offers, instead of the ones found in the home folder (dev runs offer none
@@ -61,6 +64,7 @@ impl Options {
             code_roots: Vec::new(),
             hotkey: None,
             settings: None,
+            data: None,
             offered: None,
             offered_code: None,
             debug_setup: false,
@@ -85,6 +89,7 @@ impl Options {
                 "--code-roots" => options.code_roots = std::env::split_paths(&value()?).collect(),
                 "--hotkey" => options.hotkey = Some(value()?),
                 "--settings" => options.settings = Some(value()?.into()),
+                "--data" => options.data = Some(value()?.into()),
                 "--offer" => options.offered = Some(std::env::split_paths(&value()?).collect()),
                 "--offer-code" => options.offered_code = Some(std::env::split_paths(&value()?).collect()),
                 "--debug-setup" => options.debug_setup = true,
@@ -108,6 +113,20 @@ impl Options {
 }
 
 impl Options {
+    /// The folder this copy keeps its own files in, when it isn't the system's: `--data`, DIGUP_DATA, else `data` beside
+    /// the program when the build says it's portable (`portable.txt` next to it). None: the system's folders, as before.
+    pub fn data_root(&self) -> Option<PathBuf> {
+        if let Some(folder) = &self.data {
+            return Some(folder.clone());
+        }
+        if let Some(folder) = std::env::var_os("DIGUP_DATA").filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(folder));
+        }
+        let exe = std::env::current_exe().ok()?;
+        let folder = exe.parent()?;
+        folder.join("portable.txt").is_file().then(|| folder.join("data"))
+    }
+
     /// The index folder the helpers use: `--index` in dev runs, else the person's choice, else the helper's default.
     /// The watcher gets the same path, so it passes over DigUp's own writes.
     pub fn index_folder(&self, settings: &Settings) -> Option<PathBuf> {
@@ -121,6 +140,9 @@ impl Options {
     }
 
     fn default_index_folder(&self) -> Option<PathBuf> {
+        if let Some(data) = self.data_root() {
+            return Some(data.join("index"));
+        }
         if cfg!(windows) {
             return std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
                 .map(|local| PathBuf::from(local).join("DigUpPlus").join("index"));

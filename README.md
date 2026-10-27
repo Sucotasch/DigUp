@@ -54,8 +54,9 @@ installed, so no admin rights are needed: the helper, llama.cpp's libraries, PDF
 ffmpeg sit in the `helper` folder beside the app. Windows may say it doesn't recognize the app, because it isn't
 signed yet: choose More info, then Run anyway. It needs 64-bit Windows 10 or 11.
 
-Settings live in `%APPDATA%\com.sucotasch.digupplus` and logs in `%LOCALAPPDATA%\com.sucotasch.digupplus\logs`; the
-index and the model in `%LOCALAPPDATA%\DigUpPlus`, so the folder itself can move or be replaced without re-indexing.
+The zip is portable: settings, logs, the index and the model live in `data` inside the folder you unpacked (Settings →
+Storage shows it), so a new zip can replace the old one without re-indexing. To keep that folder somewhere else, launch
+`DigUp Plus.exe --data <folder>` (or set `DIGUP_DATA`).
 
 1. Open DigUp Plus. While the model downloads (865 MB, once), pick the folders to search: whole folders, or only some
    of their subfolders. It shows how long the first pass will take for each, measured on your computer.
