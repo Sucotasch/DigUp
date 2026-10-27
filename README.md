@@ -270,9 +270,6 @@ languages written without spaces, like Chinese, Japanese and Thai, aren't split 
 Quit DigUp Plus from its tray menu and delete the folder you unpacked — that is everything: settings, logs, the
 index, the model and even the webview's own files live in `data` inside it. Nothing is written elsewhere, except the
 open-at-login entry, which is a Run key in the registry — turn that off in Settings → General first if you used it.
-The system folders only ever matter for a build run without its `portable.txt` — an older or hand-copied one, where
-the exe stood alone: `%APPDATA%\com.sucotasch.digupplus` (settings), `%LOCALAPPDATA%\com.sucotasch.digupplus` (logs)
-and `%LOCALAPPDATA%\DigUpPlus` (the model and the index).
 
 ## Contributing
 
