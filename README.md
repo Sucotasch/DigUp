@@ -46,8 +46,18 @@ here. What this fork changes is what surrounds the engine:
   files you already downloaded.
 - **A first run opens Settings, not a wizard.** Nothing has to be chosen before DigUp is usable, and nothing
   downloads by itself — the model asks first.
-- **Paged results and cosine layers.** The window loads results a page at a time (120, then 300, appended in place),
-  and the Images filter shows its ranking in layers — visible, weaker, hidden — with a fold for each.
+- **Paged results, no cap.** The window opens on the best 120 and appends the rest 300 at a time as you scroll or
+  click **Show 300 more**, and there is no limit on how far it goes: the whole ranking of what is indexed stays
+  reachable. A failed page turns the button into **Retry** without losing what's already loaded.
+- **Images: the whole ranking, in cosine layers.** The Images filter drops the mixed score for the **best segment's
+  cosine** — the best-matching region of a picture, moment of a video or stretch of audio — and pages the entire
+  ranking instead of stopping at a cap. It is cut at fixed thresholds: cosine 0.648 and up is shown at once;
+  0.600–0.648 folds under *N weaker matches* — close enough to be worth a look, not close enough to open unasked;
+  anything below 0.600 folds away as *N hidden images* until you open it, which keeps the irrelevant tail out of
+  sight without ever losing it. Files that matched by exact words stay on top whatever their cosine, and a query
+  whose own scale sits low gets both thresholds dropped under its best image, so its results aren't all hidden.
+  Scroll on its own only fetches the visible layer — the weaker tail waits for its fold or for the **Show 300 more**
+  button, so a click never pulls in rows you can't see.
 - **A keyboard-first results window.** Tab switches between the search field and the results, Del deletes the file
   under the cursor (the ticked ones, when some are ticked), Enter confirms the delete sheet, and the view stays on the
   file it was on across operations and index updates.
@@ -82,9 +92,18 @@ The zip is portable: settings, logs, the index and the model live in `data` insi
 Storage shows it), so a new zip can replace the old one without re-indexing. To keep that folder somewhere else, launch
 `DigUpPlus.exe --data <folder>` (or set `DIGUP_DATA`).
 
-1. Open DigUp Plus. While the model downloads (865 MB, once), pick the folders to search: whole folders, or only some
-   of their subfolders. It shows how long the first pass will take for each, measured on your computer.
-2. Press **Ctrl+Shift+Space** in any app and describe what you're looking for.
+1. Open DigUp Plus. The first start opens **Settings** and stops there: nothing downloads and nothing is indexed
+   until you choose.
+2. **Settings → Storage** is where the model and the index live. The model is two files, 865 MB, downloaded once:
+   pick the folder (**Change Folder…**; `data` beside the app by default) and press **Download Model…** — it asks
+   before it starts and shows the progress — or **Use Model Files…** to point at the two GGUF files you already
+   have. The same tab holds the index: **Use Existing Index…** adopts an index you already have where it is (nothing
+   is copied, and it is checked to open first), **Move Index Folder…** moves it to another disk; by default the
+   index lives in `data`.
+3. **Settings → Folders** is what gets indexed: **Add Folders…** whole folders, or open one and tick only some of
+   its subfolders. Each choice shows how long the first pass will take, measured on your computer. Once the model is
+   in place, the first pass starts on its own; after that a new file is searchable a few seconds after it lands.
+4. Press **Ctrl+Shift+Space** in any app and describe what you're looking for.
 
 DigUp Plus doesn't update itself. Settings → General shows the version and opens the releases page; a new zip replaces
 the old folder.
