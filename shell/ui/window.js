@@ -55,6 +55,10 @@ const $batch = $("batch"), $batchSummary = $("batch-summary"), $batchToggle = $(
 const $modal = $("modal"), $report = $("report");
 const $announce = $("announce"), $more = $("more-results"), $moreCount = $("more-count");
 
+/// The paths `paintSelection` last drew as chosen; null when the next paint must go over every cell (the grid was
+/// rebuilt, or more cells were added).
+let painted = null;
+
 const state = {
   query: "",
   filter: null,         // a FILTERS key, "code", or null for everything
@@ -363,6 +367,7 @@ function loadMore(auto = false) {
 /// 479 ms to draw at once, while 300 appended cells take ~13–18 ms). Returns false when the current DOM has no place
 /// for this page, in which case the caller rebuilds.
 function appendHits(strongHits, weakHits) {
+  painted = null;   // the new cells haven't been painted
   if (isCode()) {
     const box = $content.querySelector(".code-list");
     if (!box) return false;
@@ -558,6 +563,7 @@ function chip(title, icon, count, selected, action, number) {
 }
 
 function renderContent() {
+  painted = null;
   thumbnails.disconnect();
   $content.replaceChildren();
   $content.scrollTop = 0;
@@ -1047,7 +1053,11 @@ function wire(item, hit) {
 function select(path) {
   state.selection = path;
   state.navigated = true;
-  for (const item of $content.querySelectorAll("[data-path]")) item.classList.toggle("selected", item.dataset.path === path);
+  // The results grow without a cap, so a key press must not walk every cell: drop the old mark, set the new one.
+  for (const item of $content.querySelectorAll("[data-path].selected")) {
+    if (item.dataset.path !== path) item.classList.remove("selected");
+  }
+  $content.querySelector(`[data-path="${CSS.escape(path)}"]`)?.classList.add("selected");
   syncActiveDescendant();
   // With the keyboard already on the results (Tab, a click, an arrow), the focus follows the cursor, so Del and the
   // F-keys always name the highlighted file.
@@ -1195,12 +1205,24 @@ function extendSelection(step) {
 
 /// The chosen files' checkboxes and the panel, without rebuilding the grid (which would lose the scroll place).
 function paintSelection() {
-  for (const item of $content.querySelectorAll("[data-path]")) {
+  const paint = (item) => {
     const chosen = state.selected.has(item.dataset.path);
     item.classList.toggle("checked", chosen);
     item.setAttribute("aria-selected", String(chosen));
     item.querySelector(".checkbox")?.setAttribute("aria-checked", String(chosen));
+  };
+  // Only the cells whose state can have changed (what was chosen before, and what is now); a big change, or a first
+  // paint, goes over all of them.
+  const touched = new Set([...(painted ?? []), ...state.selected]);
+  if (painted && touched.size <= 64) {
+    for (const path of touched) {
+      const item = $content.querySelector(`[data-path="${CSS.escape(path)}"]`);
+      if (item) paint(item);
+    }
+  } else {
+    for (const item of $content.querySelectorAll("[data-path]")) paint(item);
   }
+  painted = new Set(state.selected);
   renderBatch();
   renderSide();
   renderStatus();

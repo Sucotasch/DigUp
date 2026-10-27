@@ -227,7 +227,11 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             guard kind == "move" || kind == "delete" else { throw CLIError("unknown file_op kind \(kind)") }
             var changed = false
             var results: [[String: Any]] = []
-            // Each file on its own: one that's gone or busy doesn't stop the others.
+            // A destination folder is judged once per request, not once per file: a batch lands in a handful of them.
+            var walkedFolders: [String: Bool] = [:]
+            // One commit for the whole batch (thousands of moves are thousands of fsyncs otherwise). Each file still
+            // runs in its own savepoint inside it: one that's gone or busy undoes only itself and doesn't stop the others.
+            try store.batch {
             for item in request["items"] as? [[String: Any]] ?? [] {
                 let from = item["from"] as? String ?? ""
                 do {
@@ -245,7 +249,7 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
                     guard let to = item["to"] as? String, !to.isEmpty else {
                         throw CLIError("a move needs a destination")
                     }
-                    if isCrawled(to) {
+                    if isCrawled(to, folders: &walkedFolders) {
                         // A row left at the destination by a file that's gone would keep the path taken.
                         if let stale = try store.file(at: to), stale.id != row.id { try store.delete(stale.id) }
                         try store.move(row.id, to: to, inode: u64(item["inode"]), device: u64(item["device"]),
@@ -263,7 +267,11 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
                     results.append(["from": from, "ok": false, "error": String("\(error)".prefix(300))])
                 }
             }
-            var reply: [String: Any] = ["results": results, "ok": !results.contains { ($0["ok"] as? Bool) == false }]
+            }
+            // `ok` is for the request as a whole: the shell turns `ok: false` into one error for every file in it, which
+            // would hide the files that did follow. Each file's own answer is in `results`.
+            var reply: [String: Any] = ["results": results, "ok": true,
+                                        "failed": results.filter { ($0["ok"] as? Bool) == false }.count]
             // The vectors in memory still say the old paths; without them loaded there's nothing to fix. A batch
             // reloads once at its end (`reload: false`).
             let reloadVectors = request["reload"] as? Bool ?? true
@@ -347,12 +355,14 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
     /// "inside a chosen folder": hidden, `.noindex`, skipped and developer folders aren't walked, and a row left there
     /// would go at the next sync (#144). A dot-prefixed file is hidden to the walk as well. Windows paths compare
     /// without case, as its disks do.
-    private func isCrawled(_ path: String) -> Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+    private func isCrawled(_ path: String, folders: inout [String: Bool]) -> Bool {
         // The walk skips hidden files by name (and on Windows, by attribute); the folder rules only cover the folders.
         guard !(path as NSString).lastPathComponent.hasPrefix(".") else { return false }
-        let target = FolderSelection.realPath(FolderSelection.parent(path))
-        return roots.contains { root in
+        let folder = FolderSelection.parent(path)
+        if let known = folders[folder] { return known }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let target = FolderSelection.realPath(folder)
+        let walked = roots.contains { root in
             let realRoot = FolderSelection.realPath(root)
             #if os(Windows)
             return Rules.isWalked(target.lowercased(), root: realRoot.lowercased(), home: home.lowercased(),
@@ -361,6 +371,8 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             return Rules.isWalked(target, root: realRoot, home: home, excluded: skipped)
             #endif
         }
+        folders[folder] = walked
+        return walked
     }
 
     /// A 64-bit file id as the shell sends it: a string, since JSON numbers lose bits above 2^53.

@@ -318,6 +318,10 @@ public final class IndexStore {
         }
     }
 
+    /// Several changes as one commit: the work inside keeps its own savepoints (`move`, `delete`), so one that fails
+    /// undoes only itself. For a batch of thousands, one fsync instead of one per file.
+    public func batch<T>(_ body: () throws -> T) throws -> T { try db.transaction(body) }
+
     /// Removes a file, its keyword text and its segments (a savepoint where `prune` or a sync is already writing).
     public func delete(_ id: Int64) throws {
         try db.transaction {

@@ -135,6 +135,14 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
     // The search service's vectors are reloaded once, after the files are done: reloading them for every one of
     // thousands would cost more than the moves themselves. Row paths come from the database anyway.
     let mut index_changed = false;
+    // The destination's names, read once for the whole batch (and kept up to date as files land): asking the folder
+    // again for every file, and for every `(2)`, `(3)`… candidate, is quadratic in a folder of thousands.
+    let mut names = destination.map(Names::of);
+    // The index follows in batches after the files are done (see `follow_index`): one request per few hundred files
+    // instead of one per file. Each entry is (its place in `report.items`, what to tell the index).
+    let mut moves: Vec<(usize, Value)> = Vec::new();
+    let mut deletes: Vec<(usize, Value)> = Vec::new();
+    let canonical_destination = destination.and_then(|folder| std::fs::canonicalize(folder).ok());
     emit(app, json!({"phase": "start", "id": report.id, "kind": report.kind, "total": total,
                      "destination": report.destination}));
     'files: for (position, item) in request.items.iter().enumerate() {
@@ -183,13 +191,7 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
                             if permanent {
                                 entry["permanent"] = json!(true);
                             }
-                            if let Err(error) = index_delete(shell, &item.path) {
-                                report.index = false;
-                                entry["index"] = json!(false);
-                                entry["index_error"] = json!(error);
-                            } else {
-                                index_changed = true;
-                            }
+                            deletes.push((report.items.len(), json!({"from": item.path})));
                             report.items.push(entry);
                         }
                         Err(error) => {
@@ -201,7 +203,8 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
                 }
                 "move" | "copy" => {
                     let destination = destination.expect("a destination was checked");
-                    if request.kind == "move" && same_folder(from, destination) {
+                    let names = names.as_mut().expect("a destination was checked");
+                    if request.kind == "move" && same_folder(from, canonical_destination.as_deref()) {
                         report.skipped += 1;
                         report.items.push(json!({"from": item.path, "ok": false, "skipped": true,
                                                  "error": "it's already in that folder",
@@ -209,9 +212,9 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
                         break 'one;
                     }
                     let result = if request.kind == "move" {
-                        move_to_free(from, destination)
+                        move_into(from, destination, names)
                     } else {
-                        copy_to_free(app, report.id, position, total, from, destination, cancel)
+                        copy_into(app, report.id, position, total, from, destination, names, cancel)
                     };
                     match result {
                         Ok((to, renamed)) => {
@@ -225,12 +228,13 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
                                 // Before the index follows: see the delete above. Both ends are noted, so a watcher
                                 // burst of any size that is only this move's files is passed over.
                                 crate::echo::note_move(from, &to);
-                                if let Err(error) = index_move(shell, &item.path, &to) {
-                                    report.index = false;
-                                    entry["index"] = json!(false);
-                                    entry["index_error"] = json!(error);
-                                } else {
-                                    index_changed = true;
+                                match move_item(&item.path, &to) {
+                                    Ok(change) => moves.push((report.items.len(), change)),
+                                    Err(error) => {
+                                        report.index = false;
+                                        entry["index"] = json!(false);
+                                        entry["index_error"] = json!(error);
+                                    }
                                 }
                             }
                             report.items.push(entry);
@@ -253,6 +257,8 @@ fn operate(app: &AppHandle, shell: &crate::Shell, request: &Request, destination
         emit(app, json!({"phase": "progress", "id": report.id, "kind": report.kind, "done": position + 1,
                          "total": total, "path": item.path}));
     }
+    index_changed |= follow_index(shell, &mut report, "move", &moves);
+    index_changed |= follow_index(shell, &mut report, "delete", &deletes);
     if index_changed {
         if let Err(error) = reload_index(shell) {
             report.index = false;
@@ -303,15 +309,24 @@ fn check_source(from: &Path, item: &Item) -> Result<(), String> {
 }
 
 /// A move or rename, never over a file: a name that's taken gets a number (`photo (2).jpg`).
+#[cfg(test)]
 fn move_to_free(from: &Path, destination: &Path) -> Result<(PathBuf, bool), String> {
+    move_into(from, destination, &mut Names::of(destination))
+}
+
+fn move_into(from: &Path, destination: &Path, names: &mut Names) -> Result<(PathBuf, bool), String> {
     for _ in 0..20 {
-        let target = free_path(destination, from);
+        let target = free_path_in(destination, from, names);
         match move_file(from, &target) {
             Ok(()) => {
+                names.add(&target);
                 let renamed = target.file_name() != from.file_name();
                 return Ok((target, renamed));
             }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,   // something appeared meanwhile
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {   // something appeared meanwhile
+                names.add(&target);
+                continue;
+            }
             Err(error) => return Err(why(&error)),
         }
     }
@@ -320,21 +335,29 @@ fn move_to_free(from: &Path, destination: &Path) -> Result<(PathBuf, bool), Stri
 
 /// A copy, never over a file, with progress and cancel. A copy that stops partway leaves a file that isn't the
 /// original: it goes.
-fn copy_to_free(app: &AppHandle, id: u64, position: usize, total: usize, from: &Path, destination: &Path,
-                cancel: &AtomicBool) -> Result<(PathBuf, bool), String> {
+#[allow(clippy::too_many_arguments)]
+fn copy_into(app: &AppHandle, id: u64, position: usize, total: usize, from: &Path, destination: &Path,
+             names: &mut Names, cancel: &AtomicBool) -> Result<(PathBuf, bool), String> {
     for _ in 0..20 {
-        let target = free_path(destination, from);
+        let target = free_path_in(destination, from, names);
         let progress = Progress { app: Some(app), id, position, total, from, to: &target, cancel,
                                   last: AtomicU64::new(0) };
         match progress.copy() {
             Ok(()) => {
+                names.add(&target);
                 let renamed = target.file_name() != from.file_name();
                 return Ok((target, renamed));
             }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                names.add(&target);
+                continue;
+            }
             Err(error) => {
+                // NotFound: the copy failed before it made the file (a busy or unreadable source), so there is
+                // nothing partial to clean up and nothing to report about it.
                 return Err(match std::fs::remove_file(&target) {
                     Ok(()) => why(&error),
+                    Err(cleanup) if cleanup.kind() == ErrorKind::NotFound => why(&error),
                     Err(cleanup) => format!("{}; the partial copy couldn't be removed: {cleanup}", why(&error)),
                 });
             }
@@ -375,26 +398,52 @@ fn delete_permanently(_: &Path) -> Result<(), String> {
 }
 
 /// Whether the file is already in the folder asked for (either spelling, either case).
-fn same_folder(from: &Path, destination: &Path) -> bool {
-    let (Some(source), Ok(target)) = (from.parent().and_then(|path| std::fs::canonicalize(path).ok()),
-                                      std::fs::canonicalize(destination)) else {
+fn same_folder(from: &Path, destination: Option<&Path>) -> bool {
+    let (Some(source), Some(target)) = (from.parent().and_then(|path| std::fs::canonicalize(path).ok()), destination)
+    else {
         return false;
     };
     source == target
 }
 
+/// The names (lowercase, as Windows compares them) already in one folder.
+struct Names(std::collections::HashSet<String>);
+
+impl Names {
+    fn of(folder: &Path) -> Self {
+        Names(std::fs::read_dir(folder)
+            .map(|entries| entries.flatten().map(|entry| entry.file_name().to_string_lossy().to_lowercase()).collect())
+            .unwrap_or_default())
+    }
+
+    fn add(&mut self, path: &Path) {
+        if let Some(name) = path.file_name() {
+            self.0.insert(name.to_string_lossy().to_lowercase());
+        }
+    }
+
+    /// Taken if the listing has it, or the file system says so (a name that appeared after the listing).
+    fn taken(&self, path: &Path) -> bool {
+        path.file_name().is_some_and(|name| self.0.contains(&name.to_string_lossy().to_lowercase())) || path.exists()
+    }
+}
+
 /// The next name in `destination` that's free: `photo.jpg`, else `photo (2).jpg`, `photo (3).jpg`… Names compare
 /// without case, as Windows does, so a name that differs only in case isn't taken for a free one.
 fn free_path(destination: &Path, from: &Path) -> PathBuf {
+    free_path_in(destination, from, &Names::of(destination))
+}
+
+fn free_path_in(destination: &Path, from: &Path, names: &Names) -> PathBuf {
     let name = from.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let first = destination.join(&name);
-    if !taken(&first) {
+    if !names.taken(&first) {
         return first;
     }
     let (stem, extension) = split_name(&name);
     for number in 2..=9999 {
         let candidate = destination.join(format!("{stem} ({number}){extension}"));
-        if !taken(&candidate) {
+        if !names.taken(&candidate) {
             return candidate;
         }
     }
@@ -407,19 +456,6 @@ fn split_name(name: &str) -> (String, String) {
         Some(dot) if dot > 0 => (name[..dot].to_string(), name[dot..].to_string()),
         _ => (name.to_string(), String::new()),
     }
-}
-
-fn taken(path: &Path) -> bool {
-    if path.exists() {
-        return true;
-    }
-    let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
-        return false;
-    };
-    let wanted = name.to_string_lossy().to_lowercase();
-    std::fs::read_dir(folder)
-        .map(|entries| entries.flatten().any(|entry| entry.file_name().to_string_lossy().to_lowercase() == wanted))
-        .unwrap_or(false)
 }
 
 /// How many of `paths` have a name already in `destination` (they get a number), and the name the first one would
@@ -469,9 +505,9 @@ fn dataless(_: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Tells the search helper that the file is at its new path now (its vectors stay), with the identity of the new place:
-/// a move to another volume gives it another device and inode. See `SearchService`'s `file_op`.
-fn index_move(shell: &crate::Shell, from: &str, to: &Path) -> Result<(), String> {
+/// What the search helper is told about one moved file: its new path, and the identity of the new place (a move to
+/// another volume gives it another device and inode). See `SearchService`'s `file_op`.
+fn move_item(from: &str, to: &Path) -> Result<Value, String> {
     let metadata = std::fs::metadata(to).map_err(|error| format!("the new file can't be read: {error}"))?;
     let mut item = json!({"from": from, "to": path_text(to), "size": metadata.len()});
     if let Some(mtime) = modified(&metadata) {
@@ -483,11 +519,32 @@ fn index_move(shell: &crate::Shell, from: &str, to: &Path) -> Result<(), String>
         item["inode"] = json!(inode.to_string());
         item["device"] = json!(device.to_string());
     }
-    ask(shell, json!({"op": "file_op", "kind": "move", "items": [item], "reload": false}))
+    Ok(item)
 }
 
-fn index_delete(shell: &crate::Shell, from: &str) -> Result<(), String> {
-    ask(shell, json!({"op": "file_op", "kind": "delete", "items": [{"from": from}], "reload": false}))
+/// How many files one request to the search helper carries: a batch of thousands is a few requests, not thousands,
+/// and no single one holds the index's write lock for long.
+const INDEX_CHUNK: usize = 500;
+
+/// Tells the search helper about a batch's moves or deletes, a chunk at a time, and puts each file's own answer on its
+/// report entry (`index`/`index_error`). Returns whether the index changed at all.
+fn follow_index(shell: &crate::Shell, report: &mut Report, kind: &str, pending: &[(usize, Value)]) -> bool {
+    let mut changed = false;
+    for chunk in pending.chunks(INDEX_CHUNK) {
+        let items: Vec<Value> = chunk.iter().map(|(_, item)| item.clone()).collect();
+        let answers = ask_each(shell, json!({"op": "file_op", "kind": kind, "items": items, "reload": false}), chunk.len());
+        for ((at, _), answer) in chunk.iter().zip(answers) {
+            match answer {
+                Ok(()) => changed = true,
+                Err(error) => {
+                    report.index = false;
+                    report.items[*at]["index"] = json!(false);
+                    report.items[*at]["index_error"] = json!(error);
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// The one reload after a batch of index changes (see `index_changed`): the search service's vectors and file kinds
@@ -512,6 +569,28 @@ fn ask(shell: &crate::Shell, request: Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// One request that carries `count` files: the answer for each, in order. A request that failed as a whole fails them
+/// all with its reason.
+fn ask_each(shell: &crate::Shell, request: Value, count: usize) -> Vec<Result<(), String>> {
+    let _moving = shell.index_move.lock().unwrap_or_else(|error| error.into_inner());
+    let reply = match tauri::async_runtime::block_on(shell.search.ask(request)) {
+        Ok(reply) => reply,
+        Err(error) => return vec![Err(format!("the index didn't follow: {error}")); count],
+    };
+    let results = reply["results"].as_array();
+    if results.is_none() && reply["ok"].as_bool() == Some(false) {
+        let reason = reply["error"].as_str().unwrap_or("the index didn't follow").to_string();
+        return vec![Err(reason); count];
+    }
+    (0..count)
+        .map(|position| match results.and_then(|results| results.get(position)) {
+            Some(result) if result["ok"].as_bool() == Some(true) => Ok(()),
+            Some(result) => Err(result["error"].as_str().unwrap_or("the index didn't follow").to_string()),
+            None => Err("the index didn't answer for it".to_string()),
+        })
+        .collect()
 }
 
 /// Why a file operation failed, in words a person can act on.
@@ -728,6 +807,22 @@ mod tests {
         put(&destination, "Photo.JPG");
         let from = put(&source, "photo.jpg");
         assert_eq!(free_path(&destination, &from).file_name().unwrap(), "photo (2).jpg");
+        let _ = std::fs::remove_dir_all(&destination);
+        let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn a_batch_keeps_its_own_names_apart_without_reading_the_folder_again() {
+        let destination = folder("batch-names");
+        let source = folder("batch-names-source");
+        put(&destination, "photo.jpg");
+        let from = put(&source, "photo.jpg");
+        let mut names = Names::of(&destination);
+        let first = free_path_in(&destination, &from, &names);
+        assert_eq!(first.file_name().unwrap(), "photo (2).jpg");
+        names.add(&first);   // the file landed: the listing is not read again, it is told
+        let second = free_path_in(&destination, &from, &names);
+        assert_eq!(second.file_name().unwrap(), "photo (3).jpg");
         let _ = std::fs::remove_dir_all(&destination);
         let _ = std::fs::remove_dir_all(&source);
     }
