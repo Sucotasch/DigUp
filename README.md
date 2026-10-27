@@ -271,7 +271,18 @@ Quit DigUp Plus from its tray menu, delete the folder you unpacked, then delete 
 (settings), `%LOCALAPPDATA%\com.sucotasch.digupplus` (logs) and `%LOCALAPPDATA%\DigUpPlus` (the model and the index).
 If it opened at login, turn that off in Settings → General first.
 
+## Contributing
+
+Issues and pull requests are welcome — please read [CONTRIBUTING.md](CONTRIBUTING.md) first: it asks for an issue
+before the code, and for a change that moves what search returns, before/after numbers from the queries in `evals/`,
+so the ranking can be seen to hold.
+
 ## Thanks
+
+This fork builds on [DigUp](https://github.com/ARahim3/DigUp) by
+[ARahim3](https://github.com/ARahim3) (MIT): the engine, the design and most of the code come from the original
+project — the changes this fork makes on top of it are listed
+[above](#this-fork-vs-upstream), and the copyright notice in [LICENSE](LICENSE) is the original's.
 
 DigUp is built on [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) by Google DeepMind (Apache 2.0)
 and [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The app is built with [Tauri](https://tauri.app) (MIT or
@@ -285,4 +296,6 @@ trademarks of Apple Inc.; Windows is a trademark of Microsoft Corporation.
 
 ## License
 
-MIT
+MIT — the same license as the original DigUp. [LICENSE](LICENSE) carries the upstream copyright notice (© 2026
+Abdur Rahim), which this fork's changes inherit; the third-party notices ship with the app
+(`THIRD-PARTY-NOTICES.txt`).
