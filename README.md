@@ -235,8 +235,8 @@ an exact code typed into the search. And doc files from old Word versions, RAW p
 on a Mac.
 
 **Why is the download 865 MB?** That's the model: the text part (310 MB) and the image and audio encoders (555 MB).
-The app itself is about 20 MB on a Mac, and on Windows and Linux 40 to 140 MB depending on the package, since those
-carry their own PDF, video and image readers.
+The app itself is about 20 MB on a Mac. This fork's portable zip is about 470 MB, mostly the CUDA runtime the helper
+carries so the model runs on NVIDIA cards; upstream's smaller packages use the GPU through Metal or Vulkan.
 
 **Will it slow my computer down?** Only the first pass is heavy. After that it reads new files only. The model runs in
 a separate process that quits when it's done, and the search side only loads while you're searching.
