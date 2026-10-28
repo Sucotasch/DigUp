@@ -159,7 +159,9 @@ function run() {
                             ...(state.like && !code ? { like: state.like } : {}),
                             ...(layered ? tierRequest(cutoffs) : {}) });
         tiers = layered ? shown.tier_counts ?? null : null;
-        if (layered && tiers && tiers.visible < TIER_MIN_VISIBLE) {
+        // A like-search's scale is the reference's own (cosine to itself is 1.0): the fixed tiers apply as they
+        // are, and the query's-top lowering has nothing to correct.
+        if (layered && !state.like && tiers && tiers.visible < TIER_MIN_VISIBLE) {
           // A query whose whole cosine scale sits below the usual cutoffs: both come down under its own top image,
           // so its best results stay visible instead of all landing in the folds.
           let top = shown.hits[0]?.cosine;
@@ -1056,7 +1058,6 @@ function wire(item, hit) {
 /// "Find similar": the clicked file's own vector becomes the query, ranked by cosine. The field names what the
 /// results are; typing anything in it goes back to ordinary searches.
 function findSimilar(hit) {
-  setFilter(null);
   state.like = hit.path;
   setQuery(`similar: ${nameOf(hit.path)}`);
 }
