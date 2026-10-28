@@ -147,7 +147,9 @@ public final class Searcher {
     public func page(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
                      offset: Int = 0, zGate: Double = 2.0, wordWeight: Double? = nil,
                      prefixLast: Bool = false, cosineFloor: Double? = nil, cosineCeiling: Double? = nil,
-                     byCosine: Bool = false, tierThresholds: [Double] = []) throws -> SearchPage {
+                     byCosine: Bool = false, tierThresholds: [Double] = [],
+                     excluding: Int64? = nil) throws -> SearchPage {
+
         let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
         if queryVector != nil, !vectorsLoaded { try reload() }
         let fileKind = self.fileKind
@@ -231,11 +233,12 @@ public final class Searcher {
             scaleCounts[rowModality[row], default: 0] += 1
         }
         var candidates = byCosine
-            ? Set(best.keys.filter { withinCosine($0) })
+            ? Set(best.keys.filter { withinCosine($0) && $0 != excluding })
             : Set(best.filter {
-                $0.value.z >= zGate
-                    || (scaleCounts[rowModality[$0.value.row], default: 0] < Self.smallCorpusVectors
-                        && $0.value.cosine >= Self.smallCorpusFloor)
+                $0.key != excluding
+                    && ($0.value.z >= zGate
+                        || (scaleCounts[rowModality[$0.value.row], default: 0] < Self.smallCorpusVectors
+                            && $0.value.cosine >= Self.smallCorpusFloor))
             }.keys)
         for (file, share) in coverage where share >= 0.5 { candidates.insert(file) }
         var scored: [Int64: Double] = [:]
@@ -390,10 +393,21 @@ public final class Searcher {
         return hits.prefix { $0.score >= top * ratio }.count
     }
 
+    /// The stored vector of a file's first row, for search by example ("Find similar"): the file's own embedding is
+    /// the query. nil when the file has no vectors in memory.
+    public func vector(forFile file: Int64) -> [Float]? {
+        guard let matrix, vectorsLoaded, let row = rowFile.firstIndex(of: file) else { return nil }
+        var out = [Float](repeating: 0, count: Vectors.dimension)
+        out.withUnsafeMutableBufferPointer { buffer in
+            Vectors.floats(fromHalf: matrix.halves + row * Vectors.dimension, count: Vectors.dimension,
+                           to: buffer.baseAddress!)
+        }
+        return out
+    }
+
     /// Cosine similarity of `query` with every stored vector (all are L2-normalized): a matrix-vector product, done a
     /// block of rows at a time, each block turned into float32 first.
-    private func score(_ query: [Float]) -> [Float] {
-        let rows = rowFile.count
+    private func score(_ query: [Float]) -> [Float] {        let rows = rowFile.count
         var scores = [Float](repeating: 0, count: rows)
         guard let matrix, rows > 0 else { return scores }
         query.withUnsafeBufferPointer { query in

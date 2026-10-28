@@ -175,6 +175,29 @@ import Testing
         #expect(rejected.isEmpty)
     }
 
+    /// Search by example ("Find similar"): the reference's own vector is the query, the ranking is by cosine, and
+    /// the reference itself stays out of its own results.
+    @Test func aLikeSearchRanksByCosineWithoutItsReference() throws {
+        let store = try IndexStore(directory: folder)
+        var query = [Float](repeating: 0, count: Vectors.dimension)
+        query[0] = 1
+        var ids: [Int64] = []
+        for (number, cosine) in [Float(0.95), 0.4, 0.8].enumerated() {
+            let id = try store.insert(Candidate(path: "/paging/photo-\(number).jpg", kind: .image, size: 1, mtime: 1,
+                                                inode: UInt64(number + 1), device: 1))
+            ids.append(id)
+            var vector = [Float](repeating: 0, count: Vectors.dimension)
+            vector[0] = cosine
+            vector[1] = max(0, 1 - cosine * cosine).squareRoot()
+            try store.addSegment(file: id, kind: .image, modality: .image, vector: vector)
+        }
+        let searcher = try Searcher(store: store)
+        let reference = try #require(searcher.vector(forFile: ids[0]))
+        #expect(abs(reference[0] - 0.95) < 0.001)   // fp16 storage rounds the components a little
+        let page = try searcher.page("", queryVector: reference, limit: 10, byCosine: true, excluding: ids[0])
+        #expect(page.hits.map(\.path) == ["/paging/photo-2.jpg", "/paging/photo-1.jpg"])
+    }
+
     /// At 8 vectors and up the group standardizes, so the gate applies as before: the 0.95 top passes by z, while the
     /// 0.7s — above the floor, but not standing out — stay out. The floor is a small-corpus rule only.
     @Test func aGroupLargeEnoughKeepsTheZGate() throws {

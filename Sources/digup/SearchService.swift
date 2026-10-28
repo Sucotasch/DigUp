@@ -7,6 +7,7 @@ import Foundation
 ///
 /// Protocol: one JSON request per line on stdin, one JSON response per line on stdout, carrying the request's `id`.
 ///   {"op":"search","q":…,"code":bool,"kinds":[…],"limit":n,"offset":n,"meaning":bool,"prefix_last":bool,
+///     "like":path (search by example: that file's vector is the query, ranked by cosine, itself excluded),
 ///     "by_cosine":bool,"cosine_floor":n,"cosine_ceiling":n,"tier_cutoffs":[visible, weak]}
 ///       → {"hits":[…], "strong":n, "total":n, "strong_total":n, "offset":n, "consumed":n, "next_offset":n,
 ///          "generation":n, "meaning":bool, "kind_counts":{kind:n}, "kind_totals":{kind:n}, "tier_counts":{…},
@@ -159,7 +160,15 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             let started = Date()
             var vector: [Float]?
             var warning: String?
-            if wantMeaning, !text.isEmpty {
+            // Search by example ("Find similar"): the reference file's own vector is the query, ranked by cosine,
+            // the reference itself left out. The vectors are already in memory: nothing re-embeds.
+            var likeFile: Int64?
+            if let path = request["like"] as? String, !path.isEmpty {
+                if let record = try? store.file(at: path) {
+                    likeFile = record.id
+                    vector = searcher.vector(forFile: record.id)
+                }
+            } else if wantMeaning, !text.isEmpty {
                 vector = self.vector(for: text, code: code)
                 // Vectors from another model or runtime must never meet: keyword-only then, and say so once.
                 if vector != nil, let indexed = (code ? codeSearcher : searcher)?.vectorSource,
@@ -182,10 +191,11 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
                 page = try codeSearcher.page(text, queryVector: vector, limit: limit, offset: offset,
                                              zGate: zGate, prefixLast: prefixLast)
             } else {
-                page = try searcher.page(text, queryVector: vector, kinds: kinds, limit: limit, offset: offset,
-                                         zGate: zGate, prefixLast: prefixLast, cosineFloor: cosineFloor,
-                                         cosineCeiling: cosineCeiling, byCosine: byCosine,
-                                         tierThresholds: tierThresholds)
+                page = try searcher.page(likeFile != nil ? "" : text, queryVector: vector, kinds: kinds,
+                                         limit: limit, offset: offset, zGate: zGate, prefixLast: prefixLast,
+                                         cosineFloor: cosineFloor, cosineCeiling: cosineCeiling,
+                                         byCosine: byCosine || likeFile != nil, tierThresholds: tierThresholds,
+                                         excluding: likeFile)
             }
             let hits = page.hits.filter {
                 if code {
@@ -204,7 +214,7 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
                 "hits": hits.map(hitFields), "strong": strongCount(hits, top: page.topScore), "total": page.total,
                 "strong_total": page.strong, "offset": page.offset, "consumed": page.consumed,
                 "next_offset": min(page.offset + page.consumed, page.total), "generation": generation,
-                "meaning": vector != nil, "kind_counts": kindCounts, "kind_totals": kindTotals,
+                "meaning": vector != nil && likeFile == nil, "kind_counts": kindCounts, "kind_totals": kindTotals,
                 "ms": ["embed": Int(embedded.timeIntervalSince(started) * 1000),
                        "search": Int(Date().timeIntervalSince(embedded) * 1000)],
             ]

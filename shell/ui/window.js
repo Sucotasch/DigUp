@@ -72,6 +72,7 @@ const state = {
   strongTotal: 0,       // of those, the strong ones, over the whole ranking
   nextOffset: 0,        // where the next page starts in the ranking; moves by the helper's `consumed`
   matchesGeneration: null,   // the helper's index generation this list came from
+  like: null,                // "Find similar": the file whose own vector is the query
   loadingMore: false,
   pageError: null,      // the last page's error, beside the button; the loaded results stay
   codePhase: null,      // "hint": "code:" alone; "off": no code folders
@@ -126,7 +127,7 @@ function run() {
   const text = /^code:/i.test(typed) ? typed.slice(5).trim() : typed;
   state.codePhase = null;
   if (!typed || (code && (!state.info.hasCode || !text))) {
-    Object.assign(state, { ranked: [], weaker: [], counts: {}, hasResults: false, selection: null,
+    Object.assign(state, { ranked: [], weaker: [], counts: {}, hasResults: false, selection: null, like: null,
                            total: 0, strongTotal: 0, nextOffset: 0, matchesGeneration: null,
                            tiered: false, tierCutoffs: null, hidden: [], hiddenTotal: 0, hiddenOffset: 0,
                            showHidden: false, loadingHidden: false, hiddenError: null,
@@ -150,12 +151,14 @@ function run() {
       // fused score) and reports how many of the whole image ranking fall in each layer.
       const layered = filtered && filter.key === "images";
       // The chips count the whole query; a helper too old to send its kind totals falls back to this first page.
-      const all = await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT });
+      const all = await ask({ op: "search", q: text, code, meaning: !state.like, limit: LIMIT,
+                              ...(state.like && !code ? { like: state.like } : {}) });
       let cutoffs = layered ? { ...IMAGE_TIERS } : null;
       let shown = all;
       let tiers = null;
       if (filtered) {
-        shown = await ask({ op: "search", q: text, code, meaning: true, limit: LIMIT, kinds: filter.kinds,
+        shown = await ask({ op: "search", q: text, code, meaning: !state.like, limit: LIMIT, kinds: filter.kinds,
+                            ...(state.like && !code ? { like: state.like } : {}),
                             ...(layered ? tierRequest(cutoffs) : {}) });
         tiers = layered ? shown.tier_counts ?? null : null;
         if (layered && tiers && tiers.visible < TIER_MIN_VISIBLE) {
@@ -298,6 +301,7 @@ function loadMore(auto = false) {
   // The same mode the first page was ranked in: if the encoder wasn't ready then, later pages must not suddenly
   // switch to meaning and mix two different rankings.
   ask({ op: "search", q: text, code, meaning: state.meaning, limit, offset,
+        ...(state.like && !code ? { like: state.like } : {}),
         ...(filter && !code ? { kinds: filter.kinds } : {}),
         ...(state.tiered ? tierRequest(state.tierCutoffs) : {}) })
     .then((reply) => {
@@ -492,6 +496,7 @@ function queryChanged() {
 function setFilter(key) {
   if (key === state.filter) return;
   state.filter = key;
+  state.like = null;   // a filter change searches by words again
   if (key !== "code" && /^code:/i.test(state.query.trim())) {
     // Leaving code for files: "code:" goes from the field.
     $query.value = state.query.trim().slice(5).trim();
@@ -1042,12 +1047,21 @@ function wire(item, hit) {
       ["Copy", () => invoke("copy_file", { path: hit.path }).catch(failed)],
       [chosen.length > 1 ? "Copy Paths" : "Copy Path", copyPaths],
     ];
+    if (MEDIA.has(hit.kind)) items.push(null, ["Find similar", () => findSimilar(hit)]);
     if (isWindows && chosen.length) {
       items.push(null, ["Move To…", () => moveOrCopy("move")], ["Copy To…", () => moveOrCopy("copy")],
                  ["Delete (Recycle Bin)", confirmDelete]);
     }
     showMenu(event.clientX, event.clientY, items);
   };
+}
+
+/// "Find similar": the clicked file's own vector becomes the query, ranked by cosine. The field names what the
+/// results are; typing anything in it goes back to ordinary searches.
+function findSimilar(hit) {
+  setFilter(null);
+  state.like = hit.path;
+  setQuery(`similar: ${nameOf(hit.path)}`);
 }
 
 function select(path) {
@@ -2317,7 +2331,7 @@ window.addEventListener("blur", hideMenu);
 
 // MARK: Keys and events
 
-$query.addEventListener("input", queryChanged);
+$query.addEventListener("input", () => { state.like = null; queryChanged(); });
 // A click back in the field: ← → move the cursor again (after picking a result, they moved the selection).
 $query.addEventListener("mousedown", () => { state.navigated = false; });
 $("clear").onmousedown = (event) => event.preventDefault();
@@ -2566,6 +2580,7 @@ tauri.event.listen("state", ({ payload }) => {
 
 // The panel handed its search over (Ctrl+O, "Show all…"): this window was already open.
 tauri.event.listen("window-search", ({ payload }) => {
+  state.like = null;
   state.filter = payload.kind || null;
   setQuery(payload.query || "");
   $query.focus();
