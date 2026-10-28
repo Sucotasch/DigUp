@@ -18,8 +18,8 @@ const TIER_GAP = 0.048;        // how far under that the weak cutoff sits (the s
 const PAGE_SIZE = 300;      // later pages: measured at ~13–18 ms of DOM each
 const MORE_MARGIN = 400;    // px from the end of the list that asks for the next page
 const FILTERS = [
-  { key: "screenshots", title: "Screenshots", kinds: ["screenshot"], icon: "screenshot" },
   { key: "images", title: "Images", kinds: ["image"], icon: "image" },
+  { key: "screenshots", title: "Screenshots", kinds: ["screenshot"], icon: "screenshot" },
   { key: "documents", title: "Documents", kinds: ["pdf", "doc"], icon: "doc" },
   { key: "video", title: "Video", kinds: ["video"], icon: "video" },
   { key: "audio", title: "Audio", kinds: ["audio"], icon: "audio" },
@@ -28,8 +28,6 @@ const FILTER_OF_KIND = { screenshot: "screenshots", image: "images", pdf: "docum
                          audio: "audio" };
 /// What Move To, Copy To and Delete work on in the first step: media, not documents or code.
 const MEDIA = new Set(["screenshot", "image", "video", "audio"]);
-/// Its chip, next to All: the four kinds above, with a key of its own (Ctrl+M) so the numbered chips keep theirs.
-const MEDIA_FILTER = { key: "media", title: "Media", kinds: [...MEDIA] };
 /// The table's columns, in order; Properties is what the other columns don't say (a picture's size, a PDF's pages…).
 const COLUMNS = [
   { key: "name", title: "Name" },
@@ -61,7 +59,7 @@ let painted = null;
 
 const state = {
   query: "",
-  filter: null,         // a FILTERS key, "code", or null for everything
+  filter: "images",     // the window opens on Images (this fork's home ground); null is All files
   text: "",             // what was searched (without "code:")
   ranked: [],           // the strong results, best first
   weaker: [],           // below half the best one's score: folded
@@ -143,7 +141,7 @@ function run() {
   renderBar();
   renderPagination();
   if (!state.hasResults) renderContent();
-  const filter = state.filter === "media" ? MEDIA_FILTER : FILTERS.find((item) => item.key === state.filter);
+  const filter = FILTERS.find((item) => item.key === state.filter);
   state.timer = setTimeout(async () => {
     try {
       const filtered = Boolean(filter) && !code;
@@ -221,7 +219,7 @@ function run() {
 /// The filter whose `kinds` the list is showing (the same one `run` sends), or nil for all files/code.
 function pageFilter() {
   if (isCode()) return null;
-  return state.filter === "media" ? MEDIA_FILTER : FILTERS.find((item) => item.key === state.filter) ?? null;
+  return FILTERS.find((item) => item.key === state.filter) ?? null;
 }
 
 /// The helper's request for the Images layers: ranked by cosine, with the hidden tail left out (its fold fetches
@@ -536,20 +534,19 @@ function renderBar() {
     : state.info.hasCode ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
     : "Describe it: “receipt from the hardware store”, “zebra in a video”…";
   $kinds.replaceChildren();
-  $kinds.append(chip("All", null, null, state.filter === null && !code, () => setFilter(null), 1));
-  if (isWindows) {
-    const media = state.filter === "media";
-    $kinds.append(chip("Media", null, mediaCount(), media, () => setFilter(media ? null : "media"), "M"));
-  }
+  // Images first: this fork's home ground (the cosine layers open with the weaker tail), All files last as the
+  // mixed view. Code sits past the divider: another index, not another kind of this one.
   FILTERS.forEach((filter, index) => {
     const selected = state.filter === filter.key && !code;
     $kinds.append(chip(filter.title, filter.icon, code ? null : state.counts[filter.key], selected,
-                       () => setFilter(selected ? null : filter.key), index + 2));
+                       () => setFilter(selected ? null : filter.key), index + 1));
   });
+  $kinds.append(chip("All files", null, null, state.filter === null && !code, () => setFilter(null),
+                     FILTERS.length + 1));
   if (state.info.hasCode) {
     $kinds.append(element("span", "divider"));
     $kinds.append(chip("Code", "code", code ? state.counts.code : null, code,
-                       () => setFilter(state.filter === "code" ? null : "code"), 7));
+                       () => setFilter(state.filter === "code" ? null : "code"), FILTERS.length + 2));
   }
   $("toggle-view").hidden = code;
   updateViewButton();
@@ -1252,10 +1249,6 @@ function copyPaths() {
 }
 
 /// All · Media 14 · Screenshots 4 · …: the media count is the four kinds together.
-function mediaCount() {
-  return ["screenshots", "images", "video", "audio"].reduce((sum, key) => sum + (state.counts[key] || 0), 0);
-}
-
 /// The chips' numbers from a list of strong results: the fallback for a helper that doesn't send kind counts.
 function countsOf(hits) {
   if (isCode()) return { code: hits.length };
@@ -1864,9 +1857,21 @@ function chooseFolders() {
 function nothingFound() {
   const icon = element("div", "quiet-icon");
   icon.innerHTML = isCode() ? ICONS.code : SEARCH_ICON;
-  return centered(icon, element("h3", "", `No good matches for “${state.query.trim()}”`),
-                  element("p", "", isCode() ? "Try saying what the code does, or a name that's in it."
-                    : "Try describing what's in it: what you'd see or hear, or words you remember."));
+  // The window opens on Images: when that filter has nothing but other views do, say where the results went.
+  const elsewhere = FILTERS.filter((f) => f.key !== state.filter && (state.counts[f.key] || 0) > 0);
+  const parts = [icon, element("h3", "", `No good matches for “${state.query.trim()}”`),
+                 element("p", "", isCode() ? "Try saying what the code does, or a name that's in it."
+                   : "Try describing what's in it: what you'd see or hear, or words you remember.")];
+  if (!isCode() && elsewhere.length) {
+    const line = element("p", "", "Nothing in this filter — the other views have:");
+    for (const filter of elsewhere) {
+      const button = element("button", "chip", `${filter.title} · ${(state.counts[filter.key] || 0).toLocaleString()}`);
+      button.onclick = () => setFilter(filter.key);
+      line.append(button);
+    }
+    parts.push(line);
+  }
+  return centered(...parts);
 }
 
 /// "code:" with nothing after it (what to type), or without code folders (what code search is).
@@ -2449,12 +2454,6 @@ document.addEventListener("keydown", (event) => {
         return;
       case "c":
         copyResult(event, state.hasResults && state.query.trim() ? selectedHit() : null, state.navigated);
-        return;
-      case "m":
-        // The Media chip (a key of its own: Ctrl+1…7 are the kinds' and don't move).
-        if (!isWindows) return;
-        event.preventDefault();
-        setFilter(state.filter === "media" ? null : "media");
         return;
       case "f":
       case "l":

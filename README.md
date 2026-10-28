@@ -126,13 +126,16 @@ the full package.
 | ⌘C | Ctrl+C (in the window) | Copies the file, to paste anywhere |
 | ⌘O | Ctrl+O | The same search in a bigger window, with a picture grid and filters |
 | — | Insert / Ctrl+A | Selects results in the big window to copy, move or delete (Windows; Ctrl+A outside the search field) |
-| — | Ctrl+M | Shows only pictures, screenshots, video and audio in the big window |
 | — | Tab | Switches the keyboard between the search field and the results (big window) |
 | — | Del | Deletes the file under the cursor, or the ticked ones (Windows); Enter confirms the Recycle Bin sheet |
+| — | Ctrl+1…6 | The big window's views: Images, Screenshots, Documents, Video, Audio, All files |
 | — | F5 / F6 / F8 | Copy To… / Move To… / Delete the selected files (Windows) |
 
 DigUp Plus lives in the tray, where you can see how indexing is going,
-pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
+pause it, or open Settings. Opening it from the Start menu or your app list shows the search window, which opens on
+the **Images** view — the fork's home ground: the whole picture ranking in cosine layers, paged as deep as it goes.
+The **All files** view (the last chip, Ctrl+6) ranks everything by the mixed score and is where a query that mixes
+kinds — a receipt, a lease page, a photo — shows its best across all of them.
 
 On Windows, the big window can move, copy and delete the pictures, screenshots, video and audio a search shows:
 select them and use the bar under the results or the right-click menu. A name that's taken gets a number
