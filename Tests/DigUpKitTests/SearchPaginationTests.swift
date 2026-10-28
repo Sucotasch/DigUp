@@ -24,8 +24,8 @@ import Testing
 
     /// Images whose cosine to the query vector is known (the vector's first component, both unit vectors), for the
     /// window's cosine layers: [1, 0, …] against [cos, sin, 0, …] is `cos`.
-    private func cosineIndex(_ cosines: [Float]) throws -> (Searcher, [Float]) {
-        let store = try IndexStore(directory: folder)
+    private func cosineIndex(_ cosines: [Float], in subdir: String = "") throws -> (Searcher, [Float]) {
+        let store = try IndexStore(directory: folder.appendingPathComponent(subdir))
         var query = [Float](repeating: 0, count: Vectors.dimension)
         query[0] = 1
         for (number, cosine) in cosines.enumerated() {
@@ -161,5 +161,25 @@ import Testing
         #expect(beyond.hits.isEmpty)
         #expect(beyond.kindCounts[.doc] == 7)
         #expect(beyond.kindTotals[.doc] == 7)
+    }
+
+    /// A tiny corpus can't reach the z gate (the top z tops out near √(n−1); issue 151): a file whose cosine is
+    /// plainly relevant is admitted by the floor, and an unrelated query at a low cosine is still rejected.
+    @Test func aSmallCorpusAdmitsByCosineAndStillRejectsUnrelated() throws {
+        let (searcher, query) = try cosineIndex([0.9, 0.5, 0.5])
+        let found = try searcher.search("something described elsewhere", queryVector: query, limit: 10)
+        #expect(found.map(\.path) == ["/paging/photo-0.jpg"])
+
+        let none = try cosineIndex([0.5, 0.5, 0.5], in: "reject")
+        let rejected = try none.0.search("something described elsewhere", queryVector: none.1, limit: 10)
+        #expect(rejected.isEmpty)
+    }
+
+    /// At 8 vectors and up the group standardizes, so the gate applies as before: the 0.95 top passes by z, while the
+    /// 0.7s — above the floor, but not standing out — stay out. The floor is a small-corpus rule only.
+    @Test func aGroupLargeEnoughKeepsTheZGate() throws {
+        let (searcher, query) = try cosineIndex([Float](repeating: 0.7, count: 7) + [0.95])
+        let found = try searcher.search("something described elsewhere", queryVector: query, limit: 10)
+        #expect(found.map(\.path) == ["/paging/photo-7.jpg"])
     }
 }

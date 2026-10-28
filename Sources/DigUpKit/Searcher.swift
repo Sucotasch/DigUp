@@ -223,9 +223,20 @@ public final class Searcher {
             if let cosineCeiling, cosine >= cosineCeiling { return false }
             return true
         }
+        // The by-cosine path (the Images layers) keeps its own band logic. Ordinary searches admit by the z gate —
+        // unless the file's modality is too small to standardize (see smallCorpusVectors), where the absolute floor
+        // takes over and a clearly matching file isn't lost to arithmetic.
+        var scaleCounts: [Modality: Int] = [:]
+        for row in rowModality.indices where rowSetsScale[row] {
+            scaleCounts[rowModality[row], default: 0] += 1
+        }
         var candidates = byCosine
             ? Set(best.keys.filter { withinCosine($0) })
-            : Set(best.filter { $0.value.z >= zGate }.keys)
+            : Set(best.filter {
+                $0.value.z >= zGate
+                    || (scaleCounts[rowModality[$0.value.row], default: 0] < Self.smallCorpusVectors
+                        && $0.value.cosine >= Self.smallCorpusFloor)
+            }.keys)
         for (file, share) in coverage where share >= 0.5 { candidates.insert(file) }
         var scored: [Int64: Double] = [:]
         for file in candidates {
@@ -408,6 +419,15 @@ public final class Searcher {
     /// inflated the narrow ones and buried PDF pages under pictures (2026-10-08, on the three evals: 91 → 94 of 105
     /// queries with the right answer first).
     ///
+    /// The z gate needs a corpus to stand out from, and a tiny one can't: with n scale-setting vectors the top z
+    /// tops out near √(n−1) under the population deviation, so under 8 vectors a relevant match can't reach the
+    /// default 2.0 at all (issue 151 on upstream: three files, cosine 0.73, z 1.41 → []; measured here: n ≤ 5 passes
+    /// 0 of 3 relevant queries, n = 8 passes 3 of 3). A group that small admits by an absolute cosine floor instead —
+    /// the same 0.600 the image layers call a weak match — and unrelated queries stay out (measured tops 0.48–0.55
+    /// on such corpora, adjacent-domain 0.59).
+    static let smallCorpusVectors = 8
+    static let smallCorpusFloor = 0.600
+
     /// The scale (the averages and the deviation) comes from the vectors in `setsScale` (all by default): `search` leaves
     /// out the later pages of long files, which are scored on it but don't move it. A book's hundreds of pages pulled the
     /// text average down for every query, and documents rose over screenshots everywhere (2026-10-09, the testbed's long
@@ -430,8 +450,7 @@ public final class Searcher {
     }
 
     /// The average score of each modality for this query. Small groups (< 20 vectors) take the average of all.
-    static func modalityMeans(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil) -> [Modality: Double] {
-        var sum: [Modality: Double] = [:], count: [Modality: Int] = [:]
+    static func modalityMeans(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil) -> [Modality: Double] {        var sum: [Modality: Double] = [:], count: [Modality: Int] = [:]
         for row in scores.indices where setsScale?[row] ?? true {
             sum[modality[row], default: 0] += Double(scores[row])
             count[modality[row], default: 0] += 1
