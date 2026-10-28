@@ -776,6 +776,13 @@ fn pause_indexing(app: AppHandle, paused: bool) {
     set_paused(&app, paused);
 }
 
+/// Puts the window away without ending anything: DigUp Plus stays in the tray, indexing goes on.
+#[tauri::command]
+fn hide_window(window: tauri::WebviewWindow) {
+    remember_place(&window);
+    let _ = window.hide();
+}
+
 /// The window's page, at its size now (its inside, in logical pixels).
 #[tauri::command]
 fn window_resized(shell: State<'_, Arc<Shell>>, width: f64, height: f64) {
@@ -861,7 +868,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ask, estimate, setup_info, pick_folders, apply_setup_folders, finish_setup, open_path, open_code, reveal, hide_panel, panel_height,
             panel_area, settings_info, set_open_at_login, set_center_panel, set_processor_only, set_confirm_move_copy,
-            set_confirm_delete, set_include_datasets, debug_query, debug_report, window_info, destination_conflicts, operation_confirmations,
+            set_confirm_delete, set_include_datasets, hide_window, debug_query, debug_report, window_info, destination_conflicts, operation_confirmations,
             app_state, open_window, open_settings, choose_folders, index_now, quit_app, close_window, pause_indexing,
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, preview_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
@@ -1397,9 +1404,13 @@ fn show_window(app: &AppHandle) -> tauri::Result<()> {
         let _ = window.set_focus();
     }
     let closing = window.clone();
+    let handle = app.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { .. } = event {
+            // The X quits DigUp Plus outright: no forgotten instances, no window that looks closed but isn't.
+            // Esc and Ctrl+W are the put-away gestures (hide_window).
             remember_place(&closing);
+            quit(&handle);
         }
     });
     Ok(())

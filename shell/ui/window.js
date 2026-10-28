@@ -2451,7 +2451,7 @@ document.addEventListener("keydown", (event) => {
         return;
       case "w":
         event.preventDefault();
-        invoke("close_window").catch(() => {});
+        invoke("hide_window").catch(() => {});
         return;
       case "c":
         copyResult(event, state.hasResults && state.query.trim() ? selectedHit() : null, state.navigated);
@@ -2559,7 +2559,12 @@ document.addEventListener("keydown", (event) => {
         closeBig();
         return;
       }
-      if (!$query.value) return;
+      if (!$query.value) {
+        // Nothing left to put away — the window itself goes to the tray (Ctrl+W does the same).
+        event.preventDefault();
+        invoke("hide_window").catch(() => {});
+        return;
+      }
       event.preventDefault();
       setQuery("");
       return;

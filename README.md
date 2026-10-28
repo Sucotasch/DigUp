@@ -137,6 +137,9 @@ the **Images** view — the fork's home ground: the whole picture ranking in cos
 The **All files** view (the last chip, Ctrl+6) ranks everything by the mixed score and is where a query that mixes
 kinds — a receipt, a lease page, a photo — shows its best across all of them.
 
+Closing the window with its **X quits DigUp Plus outright** (indexing pauses and resumes on the next start).
+**Esc** and **Ctrl+W** put the window away into the tray instead — the app keeps running and indexing.
+
 On Windows, the big window can move, copy and delete the pictures, screenshots, video and audio a search shows:
 select them and use the bar under the results or the right-click menu. A name that's taken gets a number
 (`photo (2).jpg`) instead of overwriting a file; Delete goes to the Recycle Bin, and the confirmation sheet opens with
