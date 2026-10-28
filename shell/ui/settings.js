@@ -57,6 +57,7 @@ function renderGeneral() {
   $("processor").checked = info.processorOnly;
   $("confirm-move-copy").checked = info.confirmMoveCopy;
   $("confirm-delete").checked = info.confirmDelete;
+  $("include-datasets").checked = info.includeDatasets;
   $("keys").replaceChildren(...info.hotkey.split("+").filter(Boolean).map((key) => element("span", "key", key)));
   const note = notes[info.shortcut.method];
   $("shortcut-note").hidden = !note;
@@ -96,6 +97,7 @@ wire($("center"), "set_center_panel");
 wire($("processor"), "set_processor_only");
 wire($("confirm-move-copy"), "set_confirm_move_copy");
 wire($("confirm-delete"), "set_confirm_delete");
+wire($("include-datasets"), "set_include_datasets");
 for (const choice of document.querySelectorAll('input[name="tray-click"]')) {
   choice.addEventListener("change", () => {
     $("problem").hidden = true;

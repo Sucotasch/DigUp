@@ -42,6 +42,9 @@ pub struct Settings {
     pub confirm_move_copy_off: bool,
     /// Asking before deleting (to the Recycle Bin) was turned off (Settings → General).
     pub confirm_delete_off: bool,
+    /// Index folders that look like datasets after all (Settings → Folders): the crawler skips them by default,
+    /// which buries whole photo subfolders of a collection that happen to look alike.
+    pub include_datasets: bool,
     /// The folder with both model files (Settings → Storage). None: the default folder.
     pub models_folder: Option<String>,
     /// The volume the folder was chosen on: a drive letter that comes back with another disk must not be written to.

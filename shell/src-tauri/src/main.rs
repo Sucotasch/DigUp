@@ -337,6 +337,9 @@ fn folder_arguments(settings: &Settings, code_folders: &[String]) -> Vec<String>
     for folder in &settings.code_skipped {
         args.extend(["--code-exclude".to_string(), folder.clone()]);
     }
+    if settings.include_datasets {
+        args.push("--include-datasets".to_string());
+    }
     args
 }
 
@@ -447,6 +450,7 @@ fn operation_confirmations(shell: State<'_, Arc<Shell>>) -> Value {
 #[tauri::command]
 async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>, code: Option<bool>) -> Result<Vec<Value>, String> {
     let helper = shell.options.helper.clone();
+    let include_datasets = shell.settings.lock().unwrap().include_datasets;
     // Code folders: what the code index would read in them (its time and size, repository by repository).
     let code = if code == Some(true) { vec!["--code".to_string()] } else { Vec::new() };
     // The index's costs.json: what indexing costs on this computer, once it has indexed enough.
@@ -454,7 +458,11 @@ async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>, code: Opti
     shell.estimating.fetch_add(1, Ordering::SeqCst);
     let answers = tauri::async_runtime::spawn_blocking(move || {
         let mut command = std::process::Command::new(&helper);
-        command.arg("--protocol").arg(HELPER_PROTOCOL.to_string()).arg("estimate").args(&folders).args(&index).args(&code).arg("--json");
+        command.arg("--protocol").arg(HELPER_PROTOCOL.to_string()).arg("estimate").args(&folders).args(&index).args(&code);
+        if include_datasets {
+            command.arg("--include-datasets");
+        }
+        command.arg("--json");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -853,7 +861,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ask, estimate, setup_info, pick_folders, apply_setup_folders, finish_setup, open_path, open_code, reveal, hide_panel, panel_height,
             panel_area, settings_info, set_open_at_login, set_center_panel, set_processor_only, set_confirm_move_copy,
-            set_confirm_delete, debug_query, debug_report, window_info, destination_conflicts, operation_confirmations,
+            set_confirm_delete, set_include_datasets, debug_query, debug_report, window_info, destination_conflicts, operation_confirmations,
             app_state, open_window, open_settings, choose_folders, index_now, quit_app, close_window, pause_indexing,
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, preview_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
@@ -1527,6 +1535,7 @@ fn settings_info(app: AppHandle, shell: State<'_, Arc<Shell>>) -> Value {
         "processorOnly": settings.processor_only,
         "confirmMoveCopy": !settings.confirm_move_copy_off,
         "confirmDelete": !settings.confirm_delete_off,
+        "includeDatasets": settings.include_datasets,
         // Windows' tray reports clicks (Linux's open the menu, a Mac's too).
         "canChooseTrayClick": cfg!(windows),
         "trayClick": if settings.tray_click == "panel" { "panel" } else { "window" },
@@ -2621,6 +2630,14 @@ fn set_confirm_move_copy(shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), S
 fn set_confirm_delete(shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), String> {
     let mut settings = shell.settings.lock().unwrap();
     settings.confirm_delete_off = !on;
+    settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))
+}
+
+/// Index folders that look like datasets after all (Settings → Folders): the next helper reads the flag.
+#[tauri::command]
+fn set_include_datasets(shell: State<'_, Arc<Shell>>, on: bool) -> Result<(), String> {
+    let mut settings = shell.settings.lock().unwrap();
+    settings.include_datasets = on;
     settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))
 }
 
