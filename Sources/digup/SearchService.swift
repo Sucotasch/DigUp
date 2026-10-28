@@ -164,10 +164,16 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
             // the reference itself left out. The vectors are already in memory: nothing re-embeds.
             var likeFile: Int64?
             if let path = request["like"] as? String, !path.isEmpty {
-                if let record = try? store.file(at: path) {
-                    likeFile = record.id
-                    vector = searcher.vector(forFile: record.id)
+                // Loud on failure: a silent fallback here would run a keyword search over the field's
+                // "similar: <name>" text and pass junk off as visual matches.
+                guard let record = try? store.file(at: path), record.id > 0 else {
+                    throw CLIError("the reference isn't in the index any more: \(path)")
                 }
+                likeFile = record.id
+                guard let reference = searcher.vector(forFile: record.id) else {
+                    throw CLIError("the reference's vectors aren't in the index: \(path)")
+                }
+                vector = reference
             } else if wantMeaning, !text.isEmpty {
                 vector = self.vector(for: text, code: code)
                 // Vectors from another model or runtime must never meet: keyword-only then, and say so once.

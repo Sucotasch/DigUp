@@ -396,6 +396,7 @@ public final class Searcher {
     /// The stored vector of a file's first row, for search by example ("Find similar"): the file's own embedding is
     /// the query. nil when the file has no vectors in memory.
     public func vector(forFile file: Int64) -> [Float]? {
+        if !vectorsLoaded { try? reload() }   // a like-search can be the first query a fresh helper serves
         guard let matrix, vectorsLoaded, let row = rowFile.firstIndex(of: file) else { return nil }
         var out = [Float](repeating: 0, count: Vectors.dimension)
         out.withUnsafeMutableBufferPointer { buffer in
