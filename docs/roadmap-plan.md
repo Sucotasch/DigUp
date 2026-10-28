@@ -72,6 +72,13 @@ Crawler.swift:211), P2 съёжился до проводки. Настройк�
 **Проверка:** swift-набор зелёный; живую проверку меню — на сборке.
 **Метки/коллекции референсов — осознанно ждём v0.7.0 апстрима** и портируем их дизайн (беты идут, фича обещана).
 
+## Вклад апстриму
+
+- **PR #163** (fixes #151): малокорпусный z-gate — https://github.com/ARahim3/DigUp/pull/163 (ветка fix/151-small-corpus-zgate).
+- **PR #164** (fixes #153): настройка датасетов — https://github.com/ARahim3/DigUp/pull/164 (ветка feature/153-include-datasets-setting; engine-флаг `--include-datasets` апстримовский).
+- Find similar (#162) — не предлагаем: автор везёт свою реализацию в 0.7.0. File-operations — против их заявленной в #140 концепции («Deleting or moving files stays with the Finder, on purpose») — не предлагаем.
+- Worktree'ы для итераций по ревью: `.build/pr151`, `.build/pr153`.
+
 ## Порядок и каденция
 
 P0 → P1 → P3 → P2 (P2 — единственный пункт без пострадавших, уходит в конец). Каждый пункт — свой релиз; полные
