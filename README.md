@@ -108,6 +108,12 @@ Storage shows it), so a new zip can replace the old one without re-indexing. To 
 DigUp Plus doesn't update itself. Settings → General shows the version and opens the releases page; a new zip replaces
 the old folder.
 
+**Updating.** For a first install take the full package. When a release's notes say the helper is unchanged, its
+small `-shell-only.zip` carries just `DigUpPlus.exe`: close DigUp Plus, drop it into your unpacked folder beside
+`helper\`, and you're done — nothing else moves, and your `data` folder stays as it is. The exe refuses to run with a
+helper from a different generation, so a mismatch can't happen silently; if it ever asks for the full package, take
+the full package.
+
 ## Using it
 
 | Windows and Linux | What it does |

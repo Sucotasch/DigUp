@@ -71,5 +71,16 @@ cp shell/src-tauri/THIRD-PARTY-NOTICES.txt "$release/"
 # Says this copy is portable: the shell keeps settings, logs, index and model in `data` here (options.rs) instead of
 # %APPDATA% and %LOCALAPPDATA%. `--data <folder>` or DIGUP_DATA points them anywhere else.
 printf 'DigUp Plus keeps its settings, logs, index and model in the data folder beside this file.\n' > "$release/portable.txt"
+# The helper's hash decides whether a release also ships a shell-only zip (see docs/roadmap-plan.md): the same
+# hash as the previous release means only DigUpPlus.exe moved, and updating is a small download. Cut releases check
+# this line against the previous release's notes instead of trusting memory.
+helper_sha=$(sha256sum "$release/helper/digup.exe" | cut -d" " -f1)
+echo "HELPER SHA256: $helper_sha"
+if [[ "${SHELL_ONLY:-0}" == "1" ]]; then
+  small="$PWD/.build/DigUpPlus-$version-shell-only.zip"
+  rm -f "$small"
+  (cd "$release" && powershell -NoProfile -Command "Compress-Archive -Path 'DigUpPlus.exe','portable.txt','THIRD-PARTY-NOTICES.txt' -DestinationPath '$small' -Force")
+  echo "SHELL-ONLY ZIP: $small"
+fi
 ls -la "$exe" "$release/helper" "$release/portable.txt" "$release/THIRD-PARTY-NOTICES.txt"
 echo "DigUp Plus $version: run $exe"

@@ -234,6 +234,10 @@ impl Shell {
     }
 
     fn launch(&self, args: Vec<String>, log: &str) -> Launch {
+        let mut args = args;
+        // Every helper spawn pins the protocol (see HELPER_PROTOCOL); the helper refuses a mismatch at once.
+        args.insert(1, HELPER_PROTOCOL.to_string());
+        args.insert(1, "--protocol".to_string());
         Launch {
             program: self.options.helper.clone(),
             args,
@@ -450,7 +454,7 @@ async fn estimate(shell: State<'_, Arc<Shell>>, folders: Vec<String>, code: Opti
     shell.estimating.fetch_add(1, Ordering::SeqCst);
     let answers = tauri::async_runtime::spawn_blocking(move || {
         let mut command = std::process::Command::new(&helper);
-        command.arg("estimate").args(&folders).args(&index).args(&code).arg("--json");
+        command.arg("--protocol").arg(HELPER_PROTOCOL.to_string()).arg("estimate").args(&folders).args(&index).args(&code).arg("--json");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -908,7 +912,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
     } else {
         options.code_roots.iter().map(|root| root.display().to_string()).collect()
     };
-    let mut search_args = vec!["search-service".to_string()];
+    let mut search_args = vec!["search-service".to_string(), "--protocol".to_string(), HELPER_PROTOCOL.to_string()];
     if let Some(index) = options.index_folder(&settings) {
         search_args.extend(["--index".to_string(), index.display().to_string()]);
     }
@@ -1586,6 +1590,12 @@ fn index_folder_plan(shell: State<'_, Arc<Shell>>, target: String) -> Value {
 /// A dev or checked run named the index folder on its command line; Settings can't change what that run uses.
 const FIXED_INDEX: &str = "DigUp was started with a fixed index folder (--index). Start it without that argument to move the index.";
 
+/// The shell and its helpers speak one JSON-line protocol; this number moves whenever a release changes what the
+/// helpers accept or reply. Pinned on the helper's side too (`Sources/digup/HelperProtocol.swift`): every spawn
+/// carries `--protocol`, so a shell-only update paired with a helper from another generation is refused by the
+/// helper itself instead of misparsing its replies.
+const HELPER_PROTOCOL: u32 = 1;
+
 /// Clears `index_busy` when the index work that set it ends, however it ends.
 struct Busy<'a>(&'a AtomicBool);
 impl Drop for Busy<'_> {
@@ -1688,7 +1698,8 @@ fn index_opens(shell: &Arc<Shell>, folder: &Path) -> Result<(), String> {
     }
     for code in checks {
         let mut command = std::process::Command::new(&shell.options.helper);
-        command.args(["status".to_string(), "--index".to_string(), folder.display().to_string()]);
+        command.args(["--protocol".to_string(), HELPER_PROTOCOL.to_string(), "status".to_string(),
+                      "--index".to_string(), folder.display().to_string()]);
         if code {
             command.arg("--code");
         }

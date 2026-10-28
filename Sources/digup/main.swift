@@ -736,7 +736,22 @@ func evaluate(_ args: Arguments) throws {
 // MARK: Main
 
 do {
-    let raw = CommandLine.arguments.dropFirst()
+    // The shell pins the helper protocol (see HelperProtocol): a shell-only update paired with a helper from another
+    // generation is refused here, with the fix in the message. Manual CLI runs pass nothing and always match their
+    // own build.
+    var raw = Array(CommandLine.arguments.dropFirst())
+    if let at = raw.firstIndex(of: "--protocol") {
+        guard raw.count > at + 1, let pinned = Int(raw[at + 1]) else {
+            FileHandle.standardError.write(Data("error: --protocol needs a number\n".utf8))
+            exit(2)
+        }
+        raw.removeSubrange(at...at + 1)
+        guard pinned == HelperProtocol.version else {
+            FileHandle.standardError.write(Data(("error: this helper speaks protocol \(HelperProtocol.version), the app "
+                + "asked for \(pinned): update the whole package, not just DigUpPlus.exe\n").utf8))
+            exit(3)
+        }
+    }
     guard let command = raw.first, command != "-h", command != "--help", command != "help" else {
         print(usage)
         exit(0)
